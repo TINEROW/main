@@ -2,6 +2,22 @@
 
 ## 1.0.0 — Unreleased
 
+- Bounded the lineage graph in both directions (#333). A derivative may name at
+  most `MAX_LINEAGE_FANOUT = 4` parents and a parent may be charged for at most
+  `MAX_LINEAGE_FANOUT = 4` derivatives; depth is derived from the parents and
+  capped at `MAX_LINEAGE_DEPTH = 4` instead of trusted from the caller; and an
+  empty, repeated, or unknown parent, a self-referential edge, a mis-claimed
+  depth, and a re-registration of an existing output digest are all refused
+  before any storage change. Adds `LineageChildCount`, `LineageFanOutSaturated`,
+  `LineageDepthMismatch`, `LineageAlreadyRegistered`, and
+  `get_lineage_child_count`. See `contracts/LINEAGE.md`.
+
+- Wired the orphaned `test_lineage.rs` module into the registry crate and
+  restored contract compilation under `soroban-sdk` 27.0.2: contract-visible
+  positions must spell the SDK vector as `Vec` (the spec generator resolves it by
+  its last path segment, so the `Vec as SorobanVec` alias is not recognised), and
+  `#[contractevent(topics = [...])]` accepts at most two static topics.
+
 - Bound `revocation_witness` Merkle depth at `MAX_REVOCATION_WITNESS_DEPTH = 3` (8 leaves) across the Noir circuit, registry constants, verifier codec, and host tooling (#357).
 
 - Added a CI end-to-end environment matrix (`devx/e2e_env_matrix.py`) that exercises public API boundaries across development/testing/production-like profiles with privacy-safe failure checks.

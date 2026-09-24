@@ -417,6 +417,27 @@ redeploy.
 See [DISPUTE.md](DISPUTE.md) for the state machine, error codes, threat notes,
 and migration/rollback details.
 
+## Lineage Graph Bounds (#333)
+
+`register_lineage`, `get_lineage`, and `get_lineage_child_count` record verifiable
+derivatives of registered evidence and bound the resulting graph in both
+directions. A derivative may name at most `MAX_LINEAGE_FANOUT = 4` parents, and a
+parent may be charged for at most `MAX_LINEAGE_FANOUT = 4` derivatives. Depth is
+derived from the parents rather than trusted from the caller and capped at
+`MAX_LINEAGE_DEPTH = 4`, so a caller cannot claim a shallow position to slip a
+deeper derivative past the cap.
+
+A rejected edge writes nothing: an empty, repeated, or unknown parent, a
+self-referential edge, an over-deep or mis-claimed depth, a parent set above the
+cap, a parent at its out-degree cap, and an output digest that is already
+recorded are each refused with a stable `RegistryError` code before any storage
+change. `LineageRecord` keeps its existing shape, and the only new storage key is
+`LineageChildCount`, so upgrading needs no migration and rollback is a plain wasm
+redeploy that simply stops enforcing the out-degree and replay guards.
+
+See [LINEAGE.md](LINEAGE.md) for the bounds, the error-code table, the depth
+derivation, threat notes, and the migration/rollback details.
+
 ## Scripts
 
 PowerShell helpers live in `scripts/`:
