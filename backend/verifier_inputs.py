@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from enum import Enum
+from collections.abc import Sequence
 from typing import Final
 
 CODEC_ID: Final[str] = "hpx-vi/1"
@@ -164,6 +165,43 @@ def decode_hex(
         return bytes.fromhex(value)
     except ValueError as exc:  # pragma: no cover - guarded above
         raise VerifierInputError(RejectCode.MALFORMED_HEX, field) from exc
+
+
+def _parse_field_value(value: int | str, field: str) -> int:
+    """Parse a decimal or ``0x``-prefixed field without reducing it."""
+    if isinstance(value, bool):
+        raise VerifierInputError(RejectCode.MALFORMED_HEX, field)
+    if isinstance(value, int):
+        return value
+    if not isinstance(value, str) or not value:
+        raise VerifierInputError(RejectCode.MALFORMED_HEX, field)
+    try:
+        return int(value, 16) if value.lower().startswith("0x") else int(value, 10)
+    except ValueError as exc:
+        raise VerifierInputError(RejectCode.MALFORMED_HEX, field) from exc
+
+
+def encode_field_to_bytes32_hex(value: int | str, field: str = "field") -> str:
+    """Encode one canonical BN254 field as a lowercase 32-byte hex string.
+
+    This is the backend counterpart to the browser's
+    ``encodeFieldToBytes32Hex``. Values are validated, never reduced modulo the
+    field, and rejection messages contain only the stable code and field name.
+    """
+    element = _parse_field_value(value, field)
+    if element < 0 or element >= BN254_SCALAR_FIELD_MODULUS:
+        raise VerifierInputError(RejectCode.NON_CANONICAL_FIELD, field)
+    return f"{element:064x}"
+
+
+def encode_public_inputs(
+    values: Sequence[int | str], fields: Sequence[str] = ()
+) -> str:
+    """Encode an ordered public-input vector using the canonical field codec."""
+    return "".join(
+        encode_field_to_bytes32_hex(value, fields[index] if index < len(fields) else f"field_{index}")
+        for index, value in enumerate(values)
+    )
 
 
 def is_canonical_field(element: bytes) -> bool:
