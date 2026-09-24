@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
-from flask import Flask, Response, g, jsonify, request
+from flask import Flask, Response, g, jsonify, request, send_file
 from flask_cors import CORS
 
 from http_security import apply_security_headers, cors_kwargs
@@ -26,6 +26,14 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
 from config import load_config
+from errors import (
+    INTERNAL_ERROR,
+    NOT_FOUND,
+    PAYLOAD_TOO_LARGE,
+    RATE_LIMITED,
+    VALIDATION_ERROR,
+    error_response,
+)
 from db import (
     check_db,
     database_url,
@@ -37,6 +45,7 @@ from db import (
     insert_lineage_event,
     insert_proof_event,
     insert_proof_history_event,
+    list_lineage_events,
     list_proof_events,
     list_proof_history_events,
     make_idempotency_key,
@@ -48,12 +57,29 @@ from db import (
     cancel_job,
 )
 from idempotency import idempotent
+from lineage import (
+    LineageValidationError,
+    canonical_lineage_manifest,
+    lineage_manifest_digest,
+    validate_lineage_graph,
+)
+from storage import get_job_output_path
+from retention import init_retention_worker
 from metrics import collector as metrics_collector
 from noir import generate_silent_witness, generate_aggregated_proof
 from envelope import ALLOWED_TIERS, validate_v2 as validate_embed_metadata
 from schema import discover_schemas, resolve_schema, validate_selective_disclosure_input
 from stego import canonical_metadata_hash, embed_metadata, extract_metadata, sha256_file
 from logging_utils import log_structured, redact_sensitive
+from errors import (
+    INTERNAL_ERROR,
+    NOT_FOUND,
+    PAYLOAD_TOO_LARGE,
+    VALIDATION_ERROR,
+    error_response,
+    ok_response,
+    register_request_id_propagation,
+)
 from trace_fields import (
     build_trace_fields,
     format_traceparent,
@@ -135,6 +161,8 @@ def create_app() -> Flask:
     app = Flask(__name__)
     CORS(app, **cors_kwargs(config.cors_origins))
     app.config["MAX_CONTENT_LENGTH"] = config.max_content_length
+    # Propagate the request id through every response (header + JSON body).
+    register_request_id_propagation(app)
 
     # ------------------------------------------------------------------ #
     # Rate limiting                                                        #
@@ -188,7 +216,8 @@ def create_app() -> Flask:
 
     @app.after_request
     def process_response(response: Response):
-        response.headers["X-Request-ID"] = request_id()
+        # X-Request-ID and the body-level request_id are applied by the
+        # request-id propagation hook registered in create_app().
         trace = current_trace_fields()
         if trace.get("trace_id"):
             response.headers["X-Trace-ID"] = str(trace["trace_id"])
@@ -307,6 +336,22 @@ def create_app() -> Flask:
             status=500,
         )
 
+    @app.errorhandler(429)
+    def rate_limit_exceeded(_error: Exception):
+        """Stable, privacy-safe envelope for per-client throttle responses.
+
+        Flask-Limiter injects the precise ``Retry-After`` value during
+        ``after_request``; the fallback below keeps the response well formed
+        for callers that exercise the handler directly.
+        """
+        response, status = error_response(
+            code=RATE_LIMITED,
+            message="rate limit exceeded",
+            status=429,
+        )
+        response.headers.setdefault("Retry-After", "60")
+        return response, status
+
     @app.get(config.metrics_path)
     def metrics():
         if not config.metrics_enabled:
@@ -397,6 +442,7 @@ def create_app() -> Flask:
         return len(raw) if raw else 0
 
     @app.post("/api/stego/embed")
+    @limiter.limit(config.ratelimit_embed)
     @require_capacity(admission_controller)
     @idempotent("embed")
     def embed():
@@ -481,6 +527,7 @@ def create_app() -> Flask:
         return response
 
     @app.post("/api/stego/upload-session")
+    @limiter.limit(config.ratelimit_upload_session)
     def create_upload_session():
         session_id = str(uuid.uuid4())
         session_dir = Path(tempfile.gettempdir()) / f"harpocrates-session-{session_id}"
@@ -488,6 +535,7 @@ def create_app() -> Flask:
         return jsonify({"sessionId": session_id})
 
     @app.put("/api/stego/upload-session/<session_id>/chunk/<int:chunk_index>")
+    @limiter.limit(config.ratelimit_upload_chunk)
     def upload_chunk(session_id: str, chunk_index: int):
         session_dir = Path(tempfile.gettempdir()) / f"harpocrates-session-{session_id}"
         if not session_dir.exists():
@@ -514,6 +562,7 @@ def create_app() -> Flask:
         })
 
     @app.post("/api/stego/upload-session/<session_id>/commit")
+    @limiter.limit(config.ratelimit_upload_session)
     @require_capacity(admission_controller)
     def commit_upload_session(session_id: str):
         session_dir = Path(tempfile.gettempdir()) / f"harpocrates-session-{session_id}"
@@ -595,6 +644,7 @@ def create_app() -> Flask:
         return response
 
     @app.post("/api/stego/extract")
+    @limiter.limit(config.ratelimit_extract)
     @require_capacity(admission_controller)
     @idempotent("extract")
     def extract():
@@ -764,6 +814,7 @@ def create_app() -> Flask:
         return jsonify({"ok": True, "manifestDigest": manifest_digest, "db_event": db_event})
 
     @app.post("/api/proofs/register")
+    @limiter.limit(config.ratelimit_register)
     @idempotent("register")
     def register_proof_event():
         if _enforce_json_size() > config.max_json_bytes:
@@ -1067,6 +1118,7 @@ def create_app() -> Flask:
         return ok_response({"db_event": db_event})
 
     @app.post("/api/noir/silent-witness")
+    @limiter.limit(config.ratelimit_silent_witness)
     @require_capacity(admission_controller)
     @idempotent("silent-witness")
     def silent_witness_proof():

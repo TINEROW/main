@@ -4,6 +4,7 @@ import type { UseVerificationReturn } from '../hooks/useVerification'
 import { ChainProofPanel } from '../components/ChainProofPanel'
 import { EventList } from '../components/EventList'
 import { ShareVerificationLink } from '../components/ShareVerificationLink'
+import VerificationTimeline from '../components/VerificationTimeline'
 import { shortHash } from '../utils'
 import ProvenanceCard from '../provenance/ProvenanceCard'
 import type { ProvenanceRecord } from '../provenance/provenanceModel'
@@ -158,6 +159,14 @@ export function VerifyView({ wallet, networkMismatch, verification, provenanceRe
             ) : null}
           </div>
         </div>
+
+        <VerificationTimeline
+          status={status}
+          verifyHash={verifyHash}
+          events={events}
+          chainProof={chainProof}
+          errorCode={errorCode}
+        />
 
         {/* Action row — reachable on mobile, adequate touch targets */}
         <div className="verify-actions" role="group" aria-label="Verification actions">

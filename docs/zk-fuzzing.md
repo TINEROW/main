@@ -83,17 +83,35 @@ layers:
 | 8 | `frame_rotate` | Whole-frame offset shifts |
 | 9 | `field_modulus` | The exact modulus — catches `<=` where `<` is meant |
 
-Proof blobs are fuzzed separately, by length, across the whole accepted window
-and one byte past each edge.
+Proof blobs are fuzzed on two axes:
+
+1. **Length sweep** — across the whole accepted window and one byte past each edge
+   (and, on the contract layer, across the full `u32` claim range).
+2. **Structured proof-hex mutators** (Python / TypeScript decode path) — the hex
+   string an untrusted peer actually hands over:
+
+| # | Mutator | What it probes |
+| --- | --- | --- |
+| 0 | `truncate_chars` | Framing of the hex string itself |
+| 1 | `extend_chars` | Trailing nibble / oversize hex |
+| 2 | `odd_nibble` | Odd character count (must reject before bytes) |
+| 3 | `inject_non_hex` | Non-hex characters (`z`, whitespace, …) |
+| 4 | `empty` | Zero-length proof hex → undersize |
+| 5 | `length_edge` | Exact `MIN±0/1` and `MAX±0/1` byte lengths |
+
+Rejection signals for proof decode never echo attacker-supplied hex.
 
 ## Budget
 
 | Harness | Seeds | Iterations | Notes |
 | --- | --- | --- | --- |
 | Python frames | 4 | 400 per seed per schema | 3 200 classifications |
-| Python proof blobs | 4 | 64 per seed | Bounded by bytes, not iterations |
+| Python proof blobs (length) | 4 | 64 per seed | Bounded by bytes, not iterations |
+| Python proof-hex mutators | 4 | 128 per seed | Decode + bounds path |
 | TypeScript frames | 4 | 400 per seed per schema | Same space as Python |
+| TypeScript proof-hex mutators | 4 | 128 per seed | Same decode space as Python |
 | Rust pure codec | 4 | 400 per seed per schema | Allocation-free |
+| Rust proof-length edges | — | fixed table + neighbourhood | Exact floor/ceiling + ±32 band |
 | Rust on-chain | 4 | 64 per seed per schema | Each iteration is a real contract invocation with a real budget |
 
 Seeds are `1, 7, 1337, 20260727`. These numbers are deliberately fixed, not
@@ -117,9 +135,10 @@ leaks, or classifies inconsistently across layers:
 3. Never delete an entry. If a rule intentionally changes, bump `version` and
    record the migration here.
 
-The current corpus carries ten minimized entries covering framing off-by-ones,
+The current corpus carries thirteen minimized entries covering framing off-by-ones,
 the doubled frame, the exact modulus, a single padding bit, a zero nullifier, a
-final-byte domain difference, and both proof-size edges.
+final-byte domain difference, both proof-size edges, and proof-hex decode traps
+(odd nibble, non-hex, empty).
 
 ## Running the harnesses
 

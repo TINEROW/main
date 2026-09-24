@@ -147,13 +147,13 @@ jobs:
       - name: Verify toolchain versions match lock file
         run: |
           python3 -c "
-import json
-lock = json.load(open('zk/toolchain.lock.json'))
-tc = lock['toolchain']
-expected_nargo = tc['nargo']['version']
-expected_bb = tc['barretenberg']['version']
-print(f'Expecting nargo {expected_nargo}, bb {expected_bb}')
-"
+          import json
+          lock = json.load(open('zk/toolchain.lock.json'))
+          tc = lock['toolchain']
+          expected_nargo = tc['nargo']['version']
+          expected_bb = tc['barretenberg']['version']
+          print(f'Expecting nargo {expected_nargo}, bb {expected_bb}')
+          "
           ACTUAL_NARGO="$(nargo --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?' | head -n1 || true)"
           ACTUAL_BB="$(bb --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
           echo "Installed: nargo ${ACTUAL_NARGO}, bb ${ACTUAL_BB}"

@@ -1,0 +1,33 @@
+name: Migration guide examples
+
+on:
+  pull_request:
+    paths:
+      - MIGRATION_GUIDE.md
+      - scripts/test_migration_guide_examples.ps1
+      - contracts/scripts/set-verifier.ps1
+      - contracts/contracts/harpocrates-registry/src/lib.rs
+      - frontend/src/seedVault.ts
+      - .github/workflows/migration-guide-examples.yml
+  push:
+    branches: [main]
+    paths:
+      - MIGRATION_GUIDE.md
+      - scripts/test_migration_guide_examples.ps1
+      - contracts/scripts/set-verifier.ps1
+      - contracts/contracts/harpocrates-registry/src/lib.rs
+      - frontend/src/seedVault.ts
+      - .github/workflows/migration-guide-examples.yml
+
+permissions:
+  contents: read
+
+jobs:
+  examples:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate PowerShell migration examples without network or deployment
+        shell: pwsh
+        run: ./scripts/test_migration_guide_examples.ps1

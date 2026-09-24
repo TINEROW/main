@@ -39,9 +39,11 @@ from verifier_inputs import (
     FIELD_LEN,
     MAX_HEX_CHARS,
     MAX_PROOF_BYTES,
+    MIN_PROOF_BYTES,
     PUBLIC_INPUTS_LEN,
     RejectCode,
     VerifierInputError,
+    check_proof_bounds,
     classify,
     decode_hex,
     parse_public_inputs,
@@ -227,6 +229,133 @@ def test_mutated_proof_blobs_always_produce_a_declared_verdict(seed: int):
             f"produced undeclared verdict {verdict!r}"
         )
 
+
+
+
+# ── 1b. Structured proof-hex decoding fuzz ──────────────────────────────────
+#
+# Frame mutators above never touch the proof wire. These mutators exercise the
+# hex decode + size-bound path that every untrusted proof blob must pass.
+
+
+PROOF_HEX_MUTATORS = (
+    "truncate_chars",
+    "extend_chars",
+    "odd_nibble",
+    "inject_non_hex",
+    "empty",
+    "length_edge",
+)
+
+
+def mutate_proof_hex(base_hex: str, mutator: str, rng: Lcg) -> str:
+    """Produce a neighbouring proof-hex string. Always returns a bounded string."""
+    if mutator == "truncate_chars":
+        keep = rng.below(len(base_hex) + 1)
+        return base_hex[:keep]
+    if mutator == "extend_chars":
+        extra = 1 + rng.below(128)
+        alphabet = "0123456789abcdef"
+        return base_hex + "".join(alphabet[rng.below(16)] for _ in range(extra))
+    if mutator == "odd_nibble":
+        # Force an odd character count so decode_hex must reject before bytes.
+        if len(base_hex) % 2 == 0:
+            return base_hex + "a"
+        return base_hex
+    if mutator == "inject_non_hex":
+        if not base_hex:
+            return "zz"
+        chars = list(base_hex)
+        chars[rng.below(len(chars))] = "zgy !"[rng.below(5)]
+        return "".join(chars)
+    if mutator == "empty":
+        return ""
+    if mutator == "length_edge":
+        # Exact floor/ceiling neighbours — the classic off-by-one traps.
+        edges = (
+            MIN_PROOF_BYTES - 1,
+            MIN_PROOF_BYTES,
+            MAX_PROOF_BYTES,
+            MAX_PROOF_BYTES + 1,
+        )
+        length = edges[rng.below(len(edges))]
+        return "cd" * length
+    raise AssertionError(f"unknown proof mutator {mutator!r}")
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_proof_hex_mutants_always_produce_a_declared_verdict(seed: int):
+    schema = SCHEMAS[0]
+    frame_hex = POSITIVE_FRAMES[schema].hex()
+    rng = Lcg(seed)
+
+    for iteration in range(128):
+        mutator = PROOF_HEX_MUTATORS[rng.below(len(PROOF_HEX_MUTATORS))]
+        proof_hex = mutate_proof_hex(BASE_PROOF_HEX, mutator, rng)
+        # Bound hostile extensions the same way the codec bounds them.
+        if len(proof_hex) > MAX_HEX_CHARS + 64:
+            proof_hex = proof_hex[: MAX_HEX_CHARS + 64]
+
+        verdict = classify(schema, frame_hex, proof_hex)
+
+        assert verdict is None or verdict in DECLARED_CODES, (
+            f"seed={seed} iteration={iteration} mutator={mutator} "
+            f"proof_chars={len(proof_hex)} produced undeclared verdict {verdict!r}"
+        )
+
+
+@pytest.mark.parametrize(
+    "length,expected",
+    [
+        (0, "proof_undersize"),
+        (MIN_PROOF_BYTES - 1, "proof_undersize"),
+        (MIN_PROOF_BYTES, None),
+        (MAX_PROOF_BYTES, None),
+        (MAX_PROOF_BYTES + 1, "proof_oversize"),
+    ],
+)
+def test_proof_length_edges_are_exact(length, expected):
+    schema = SCHEMAS[0]
+    frame_hex = POSITIVE_FRAMES[schema].hex()
+    assert classify(schema, frame_hex, "ab" * length) == expected
+
+
+@pytest.mark.parametrize(
+    "proof_hex,expected",
+    [
+        ("a", "malformed_hex"),
+        ("abc", "malformed_hex"),
+        ("zz", "malformed_hex"),
+        ("ab zz", "malformed_hex"),
+        ("0x" + "ab" * 64, "malformed_hex"),
+    ],
+)
+def test_malformed_proof_hex_rejects_before_bounds(proof_hex, expected):
+    schema = SCHEMAS[0]
+    frame_hex = POSITIVE_FRAMES[schema].hex()
+    assert classify(schema, frame_hex, proof_hex) == expected
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_proof_rejection_signals_never_echo_mutant_bytes(seed: int):
+    schema = SCHEMAS[0]
+    frame_hex = POSITIVE_FRAMES[schema].hex()
+    rng = Lcg(seed)
+
+    for _ in range(64):
+        mutator = PROOF_HEX_MUTATORS[rng.below(len(PROOF_HEX_MUTATORS))]
+        proof_hex = mutate_proof_hex(BASE_PROOF_HEX, mutator, rng)
+        if len(proof_hex) > MAX_HEX_CHARS + 64:
+            proof_hex = proof_hex[: MAX_HEX_CHARS + 64]
+
+        try:
+            check_proof_bounds(decode_hex(proof_hex, field="proof"))
+        except VerifierInputError as error:
+            rendered = json.dumps(error.signal()) + str(error)
+            assert set(error.signal()) <= {"codec", "reject_code", "field"}
+            if len(proof_hex) >= 8:
+                assert proof_hex[:8] not in rendered
+                assert proof_hex[-8:] not in rendered
 
 # ── 2. Determinism: the same seed replays exactly ───────────────────────────
 

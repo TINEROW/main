@@ -13,17 +13,32 @@ from typing import Mapping, MutableMapping
 # of truth for both create_app() and focused CORS tests.
 CORS_METHODS: tuple[str, ...] = ("GET", "POST", "OPTIONS")
 
+# Request headers the public API accepts from browser clients. The trace /
+# correlation headers are emitted by the request middleware in ``app.py``
+# (``trace_fields.build_trace_fields``); they must be allowed here so a
+# cross-origin client can supply them and have its request IDs propagated.
 CORS_ALLOW_HEADERS: tuple[str, ...] = (
     "Content-Type",
     "Authorization",
     "X-Request-ID",
+    "X-Trace-ID",
+    "X-Correlation-ID",
+    "X-Span-ID",
+    "traceparent",
     "X-Metrics-Token",
     "X-Harpocrates-Retention-Class",
 )
 
+# Response headers a cross-origin browser client is allowed to read. The
+# request middleware echoes the correlation IDs on every response, so they must
+# be exposed as well or the browser silently hides them.
 CORS_EXPOSE_HEADERS: tuple[str, ...] = (
     "Content-Disposition",
     "X-Request-ID",
+    "X-Trace-ID",
+    "X-Correlation-ID",
+    "X-Span-ID",
+    "traceparent",
     "X-Harpocrates-Source-Hash",
     "X-Harpocrates-Embedded-Hash",
     "X-Harpocrates-Metadata-Hash",

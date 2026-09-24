@@ -23,8 +23,10 @@ import {
   FIELD_LEN,
   MAX_HEX_CHARS,
   MAX_PROOF_BYTES,
+  MIN_PROOF_BYTES,
   PUBLIC_INPUTS_LEN,
   VerifierInputError,
+  checkProofBounds,
   classify,
   decodeHex,
   parsePublicInputs,
@@ -237,6 +239,133 @@ describe('structured frame fuzzing', () => {
       const length = rng.below(MAX_PROOF_BYTES + 2)
       const verdict = classify(schema, frameHex, 'cd'.repeat(length))
       expect(verdict === null || DECLARED_CODES.has(verdict)).toBe(true)
+    }
+  })
+})
+
+
+// ── 1b. Structured proof-hex decoding fuzz ──────────────────────────────────
+
+const PROOF_HEX_MUTATORS = [
+  'truncate_chars',
+  'extend_chars',
+  'odd_nibble',
+  'inject_non_hex',
+  'empty',
+  'length_edge',
+] as const
+
+type ProofHexMutator = (typeof PROOF_HEX_MUTATORS)[number]
+
+const NON_HEX = ['z', 'g', 'y', ' ', '!'] as const
+
+/** Produce a neighbouring proof-hex string. Always returns a bounded string. */
+function mutateProofHex(baseHex: string, mutator: ProofHexMutator, rng: Lcg): string {
+  switch (mutator) {
+    case 'truncate_chars':
+      return baseHex.slice(0, rng.below(baseHex.length + 1))
+    case 'extend_chars': {
+      const alphabet = '0123456789abcdef'
+      let extra = ''
+      const count = 1 + rng.below(128)
+      for (let index = 0; index < count; index += 1) {
+        extra += alphabet[rng.below(16)]
+      }
+      return baseHex + extra
+    }
+    case 'odd_nibble':
+      return baseHex.length % 2 === 0 ? baseHex + 'a' : baseHex
+    case 'inject_non_hex': {
+      if (baseHex.length === 0) return 'zz'
+      const chars = [...baseHex]
+      chars[rng.below(chars.length)] = NON_HEX[rng.below(NON_HEX.length)]
+      return chars.join('')
+    }
+    case 'empty':
+      return ''
+    case 'length_edge': {
+      const edges = [
+        MIN_PROOF_BYTES - 1,
+        MIN_PROOF_BYTES,
+        MAX_PROOF_BYTES,
+        MAX_PROOF_BYTES + 1,
+      ]
+      return 'cd'.repeat(edges[rng.below(edges.length)])
+    }
+  }
+}
+
+describe('structured proof-hex decoding fuzz', () => {
+  for (const seed of SEEDS) {
+    it(`seed=${seed} always produces a declared verdict`, () => {
+      const schema = SCHEMAS[0]
+      const frameHex = toHex(positiveFrames.get(schema)!)
+      const rng = new Lcg(seed)
+
+      for (let iteration = 0; iteration < 128; iteration += 1) {
+        const mutator = PROOF_HEX_MUTATORS[rng.below(PROOF_HEX_MUTATORS.length)]
+        let proofHex = mutateProofHex(BASE_PROOF_HEX, mutator, rng)
+        if (proofHex.length > MAX_HEX_CHARS + 64) {
+          proofHex = proofHex.slice(0, MAX_HEX_CHARS + 64)
+        }
+        const verdict = classify(schema, frameHex, proofHex)
+        expect(
+          verdict === null || DECLARED_CODES.has(verdict),
+          `iteration=${iteration} mutator=${mutator} produced ${String(verdict)}`,
+        ).toBe(true)
+      }
+    })
+  }
+
+  it.each([
+    [0, 'proof_undersize'],
+    [MIN_PROOF_BYTES - 1, 'proof_undersize'],
+    [MIN_PROOF_BYTES, null],
+    [MAX_PROOF_BYTES, null],
+    [MAX_PROOF_BYTES + 1, 'proof_oversize'],
+  ] as const)('proof length %i yields %s', (length, expected) => {
+    const schema = SCHEMAS[0]
+    const frameHex = toHex(positiveFrames.get(schema)!)
+    expect(classify(schema, frameHex, 'ab'.repeat(length))).toBe(expected)
+  })
+
+  it.each([
+    ['a', 'malformed_hex'],
+    ['abc', 'malformed_hex'],
+    ['zz', 'malformed_hex'],
+    ['ab zz', 'malformed_hex'],
+    [`0x${'ab'.repeat(64)}`, 'malformed_hex'],
+  ] as const)('malformed proof hex %j rejects before bounds', (proofHex, expected) => {
+    const schema = SCHEMAS[0]
+    const frameHex = toHex(positiveFrames.get(schema)!)
+    expect(classify(schema, frameHex, proofHex)).toBe(expected)
+  })
+
+  it.each(SEEDS)('seed=%i proof rejection signals never echo mutant bytes', (seed) => {
+    const schema = SCHEMAS[0]
+    const frameHex = toHex(positiveFrames.get(schema)!)
+    const rng = new Lcg(seed)
+
+    for (let index = 0; index < 64; index += 1) {
+      const mutator = PROOF_HEX_MUTATORS[rng.below(PROOF_HEX_MUTATORS.length)]
+      let proofHex = mutateProofHex(BASE_PROOF_HEX, mutator, rng)
+      if (proofHex.length > MAX_HEX_CHARS + 64) {
+        proofHex = proofHex.slice(0, MAX_HEX_CHARS + 64)
+      }
+
+      try {
+        checkProofBounds(decodeHex(proofHex, 'proof'))
+      } catch (error) {
+        const rejection = error as VerifierInputError
+        const rendered = JSON.stringify(rejection.signal()) + rejection.message
+        expect(Object.keys(rejection.signal()).sort()).toEqual(
+          expect.arrayContaining(['codec', 'rejectCode']),
+        )
+        if (proofHex.length >= 8) {
+          expect(rendered).not.toContain(proofHex.slice(0, 8))
+          expect(rendered).not.toContain(proofHex.slice(-8))
+        }
+      }
     }
   })
 })

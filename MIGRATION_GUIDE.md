@@ -10,6 +10,8 @@
 
 This guide covers the migration from the legacy (v1) nullifier derivation to the scoped nullifier v2 derivation.  It is intended for maintainers and operators of Harpocrates registry contracts and verifier contracts.
 
+The PowerShell commands below are checked in CI with `stellar` and `cargo` replaced by local stubs. CI validates their syntax, script references, and argument shape; it never deploys a contract or uses real keys. Supply your own admin alias, contract IDs, and pinned verifier artifacts before running them against a network.
+
 ---
 
 ## 2. What Changed
@@ -42,15 +44,16 @@ This guide covers the migration from the legacy (v1) nullifier derivation to the
 
 ### 3.2 Step 1: Deploy the New Verifier Contract
 
-Build and deploy a new UltraHonk verifier contract that supports the v2 scoped public input layout (192 bytes, 6 × BN254 field elements):
+Build a compatible UltraHonk verifier with the pinned toolchain described in [Verifier Integration](contracts/VERIFIER_INTEGRATION.md). Set `$VerifierWasm` to that verifier's WASM and `$VerifierVk` to its Soroban verification-key artifact. The registry WASM is **not** the verifier. Deploy the verifier with your configured `$Admin` alias:
 
+<!-- ci-example: deploy-verifier -->
 ```powershell
-cd contracts
-stellar contract build
 stellar contract deploy `
-  --wasm target\wasm32-unknown-unknown\release\harpocrates_registry.wasm `
-  --source <admin> `
-  --network testnet
+  --wasm $VerifierWasm `
+  --source $Admin `
+  --network testnet `
+  -- `
+  --vk_bytes-file-path $VerifierVk
 ```
 
 ### 3.3 Step 2: Update the Registry Contract
@@ -68,27 +71,32 @@ If you are upgrading an existing registry contract, this is a **non-breaking upg
 
 ### 3.4 Step 3: Set the Verifier on the Registry
 
+<!-- ci-example: attach-verifier -->
 ```powershell
 .\contracts\scripts\set-verifier.ps1 `
-  -ContractId <REGISTRY_CONTRACT_ID> `
-  -Admin <ADMIN_KEY> `
-  -Verifier <NEW_VERIFIER_CONTRACT_ID>
+  -ContractId $RegistryContractId `
+  -Admin $Admin `
+  -Verifier $VerifierContractId
 ```
 
 ### 3.5 Step 4: Configure Scopes and Epochs
 
-For each verifier/purpose combination, compute the scope field element and set the initial epoch:
+For each verifier/purpose combination, use `deriveVerifierScope` in `frontend/src/seedVault.ts` to obtain the **decimal** BN254 field element. Set `$ScopeFieldDecimal` to that value. The contract takes `BytesN<32>`, so encode it as a 32-byte big-endian hex string before invoking `set_scope_epoch`:
 
+<!-- ci-example: set-scope-epoch -->
 ```powershell
-# In the frontend, derive the scope field:
-# npx ts-node -e "import { deriveVerifierScope } from './seedVault'; deriveVerifierScope('GC...', 'attestation').then(console.log)"
-
-# Then set the epoch on-chain:
-.\contracts\scripts\set-scope-epoch.ps1 `
-  -ContractId <REGISTRY_CONTRACT_ID> `
-  -Admin <ADMIN_KEY> `
-  -Scope <SCOPE_FIELD_ELEMENT> `
-  -Epoch 0
+$scopeNumber = [System.Numerics.BigInteger]::Parse($ScopeFieldDecimal)
+$fieldModulus = [System.Numerics.BigInteger]::Parse('21888242871839275222246405745257275088548364400416034343698204186575808495617')
+if ($scopeNumber -le 0 -or $scopeNumber -ge $fieldModulus) { throw 'Scope must be a nonzero BN254 field element.' }
+$ScopeHex = [Convert]::ToHexString($scopeNumber.ToByteArray($true, $true)).PadLeft(64, '0')
+stellar contract invoke `
+  --id $RegistryContractId `
+  --source $Admin `
+  --network testnet `
+  -- set_scope_epoch `
+  --admin $Admin `
+  --scope $ScopeHex `
+  --epoch 0
 ```
 
 ### 3.6 Step 5: Verify the Migration
@@ -100,6 +108,7 @@ Run the contract test suite to verify that:
 3. Epoch management works correctly
 4. Replay protection is enforced
 
+<!-- ci-example: contract-tests -->
 ```powershell
 cd contracts
 cargo test --lib
@@ -144,26 +153,34 @@ cargo test --lib
 | Scenario | Rollback Action |
 |----------|----------------|
 | v2 proof verification fails | Switch verifier back to the v1 verifier contract |
-| Epoch rotation causes legitimate failures | Reset epoch to the previous value via `set_scope_epoch` |
-| Scope configuration error | Remove the scope epoch entry (set to 0) |
+| Epoch rotation causes legitimate failures | Admin may restore the previous epoch via `set_scope_epoch`; assess whether old proofs would become valid again |
+| Scope configuration error | Admin may set the epoch to 0, but the storage entry remains and old proofs may become valid again |
 | Contract bug in v2 path | Deploy a patched contract and redirect verifier |
 
 ### 5.2 Rollback Procedure
 
 1. Switch the verifier back to the previous verifier contract:
+   <!-- ci-example: rollback-verifier -->
    ```powershell
    .\contracts\scripts\set-verifier.ps1 `
-     -ContractId <REGISTRY_CONTRACT_ID> `
-     -Admin <ADMIN_KEY> `
-     -Verifier <OLD_VERIFIER_CONTRACT_ID>
+     -ContractId $RegistryContractId `
+     -Admin $Admin `
+     -Verifier $OldVerifierContractId
    ```
-2. Reset any scope epochs that were advanced:
+2. If restoring an epoch is necessary, review the replay implications first. Use the same 64-character `$ScopeHex` derived above and a reviewed `$PreviousEpoch` value:
+   <!-- ci-example: rollback-epoch -->
    ```powershell
-   .\contracts\scripts\set-scope-epoch.ps1 `
-     -ContractId <REGISTRY_CONTRACT_ID> `
-     -Admin <ADMIN_KEY> `
-     -Scope <SCOPE_FIELD> `
-     -Epoch <PREVIOUS_EPOCH>
+   if ($ScopeHex -notmatch '^[0-9A-Fa-f]{64}$') { throw 'Scope must be exactly 32 bytes of hex.' }
+   [UInt64]$epochValue = 0
+   if (-not [UInt64]::TryParse([string]$PreviousEpoch, [ref]$epochValue)) { throw 'Epoch must be a u64 value.' }
+   stellar contract invoke `
+     --id $RegistryContractId `
+     --source $Admin `
+     --network testnet `
+     -- set_scope_epoch `
+     --admin $Admin `
+     --scope $ScopeHex `
+     --epoch $epochValue
    ```
 3. Verify that v1 proofs work again:
    ```powershell
@@ -222,8 +239,8 @@ The contract enforces the 64-byte limit via `MAX_SCOPE_LENGTH`. The frontend enf
 ### 7.2 Epoch Advancement
 
 - Epochs can only be advanced by the registry admin
-- Epochs are monotonically increasing within a scope
-- There is no epoch rollback — once an epoch is advanced, proofs from previous epochs are permanently rejected
+- The current contract permits an admin to set a lower epoch; it does not enforce monotonicity
+- Lowering an epoch can make previously stale proofs valid again, although consumed nullifiers remain consumed. Treat an epoch rollback as a security-sensitive admin action
 
 ### 7.3 Cross-Network Isolation
 

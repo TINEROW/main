@@ -5,6 +5,11 @@ from __future__ import annotations
 import json
 import unittest
 
+from http_security import (
+    CORS_ALLOW_HEADERS,
+    CORS_EXPOSE_HEADERS,
+    is_cors_request_header_allowed,
+)
 from trace_fields import (
     TRACE_FIELDS_SCHEMA_VERSION,
     assert_trace_fields_privacy_safe,
@@ -199,6 +204,83 @@ class TraceFieldsFlaskIntegrationTests(unittest.TestCase):
         dumped = json.dumps(event)
         self.assertNotIn("credentialSecret", dumped)
         self.assertNotIn("nullifierSecret", dumped)
+
+
+class TraceHeaderCorsPropagationTests(unittest.TestCase):
+    """Trace/correlation IDs must cross the browser (CORS) boundary.
+
+    ``process_response`` echoes the IDs on every response, but a browser client
+    on a different origin can only read or send them when the CORS policy
+    exposes and allows the same headers. Regression coverage for
+    ``http_security.CORS_EXPOSE_HEADERS`` / ``CORS_ALLOW_HEADERS``.
+    """
+
+    TRACE_HEADERS = (
+        "X-Request-ID",
+        "X-Trace-ID",
+        "X-Correlation-ID",
+        "X-Span-ID",
+        "traceparent",
+    )
+
+    def setUp(self) -> None:
+        import app as app_module
+
+        self.app = app_module.create_app()
+        self.app.config["TESTING"] = True
+        self.client = self.app.test_client()
+
+    @staticmethod
+    def _split_header(value: str | None) -> set[str]:
+        if not value:
+            return set()
+        return {item.strip().lower() for item in value.split(",") if item.strip()}
+
+    def test_cors_policy_allows_and_exposes_trace_headers(self) -> None:
+        allowed = {header.lower() for header in CORS_ALLOW_HEADERS}
+        exposed = {header.lower() for header in CORS_EXPOSE_HEADERS}
+        for header in self.TRACE_HEADERS:
+            self.assertIn(header.lower(), allowed)
+            self.assertIn(header.lower(), exposed)
+            self.assertTrue(is_cors_request_header_allowed(header))
+
+    def test_response_exposes_trace_headers_cross_origin(self) -> None:
+        response = self.client.get(
+            "/health",
+            headers={
+                "Origin": "http://localhost:5173",
+                "X-Request-ID": "req-cors-1",
+                "X-Correlation-ID": "corr-cors-1",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers["Access-Control-Allow-Origin"], "http://localhost:5173"
+        )
+        exposed = self._split_header(
+            response.headers.get("Access-Control-Expose-Headers")
+        )
+        for header in self.TRACE_HEADERS:
+            self.assertIn(header.lower(), exposed)
+        # The echoed IDs stay intact for browser-side correlation.
+        self.assertEqual(response.headers["X-Request-ID"], "req-cors-1")
+        self.assertEqual(response.headers["X-Correlation-ID"], "corr-cors-1")
+
+    def test_preflight_allows_client_supplied_trace_headers(self) -> None:
+        response = self.client.options(
+            "/health",
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "X-Correlation-ID, traceparent",
+            },
+        )
+        self.assertIn(response.status_code, (200, 204))
+        allowed = self._split_header(
+            response.headers.get("Access-Control-Allow-Headers")
+        )
+        self.assertIn("x-correlation-id", allowed)
+        self.assertIn("traceparent", allowed)
 
 
 if __name__ == "__main__":

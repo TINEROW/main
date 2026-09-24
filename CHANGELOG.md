@@ -18,6 +18,10 @@
   its last path segment, so the `Vec as SorobanVec` alias is not recognised), and
   `#[contractevent(topics = [...])]` accepts at most two static topics.
 
+- Extended structured fuzzing of proof and public-input decoding: proof-hex
+  mutators (odd nibble, non-hex, empty, length edges), exact proof-bound tables,
+  silence checks, and regression corpus entries `fz-011`–`fz-013` (#369).
+
 - Bound `revocation_witness` Merkle depth at `MAX_REVOCATION_WITNESS_DEPTH = 3` (8 leaves) across the Noir circuit, registry constants, verifier codec, and host tooling (#357).
 
 - Added a CI end-to-end environment matrix (`devx/e2e_env_matrix.py`) that exercises public API boundaries across development/testing/production-like profiles with privacy-safe failure checks.

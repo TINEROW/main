@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import struct
 import zlib
 from typing import Any
@@ -8,7 +9,15 @@ from datetime import datetime, timezone, timedelta
 MAGIC_V1 = b"HRPSTG1"
 MAGIC_V2 = b"HRPSTG2"
 MAX_PAYLOAD_BYTES = 64 * 1024
+# Hard ceiling for the *inflated* metadata. A small, checksum-valid zlib member
+# can expand to an arbitrarily large buffer (a "decompression bomb"), so
+# decompression is bounded by this limit and any payload that would inflate past
+# it is rejected instead of being materialised in memory. It matches the
+# envelope body limit because legitimate metadata is already gated to well below
+# this size at the API boundary.
+MAX_DECOMPRESSED_BYTES = MAX_PAYLOAD_BYTES
 ALLOWED_TIERS = {"silent", "source", "seal"}
+_HEX_32_PATTERN = re.compile(r"[0-9a-fA-F]{64}")
 
 
 def canonical_metadata_hash(metadata: dict[str, Any]) -> str:
@@ -21,13 +30,11 @@ def _canonical_json(metadata: dict[str, Any]) -> bytes:
 
 
 def _is_hex_32(value: Any) -> bool:
-    if not isinstance(value, str) or len(value) != 64:
+    if not isinstance(value, str):
         return False
-    try:
-        int(value, 16)
-    except ValueError:
-        return False
-    return True
+    # ``int(value, 16)`` also accepts a ``0x`` prefix and surrounding whitespace,
+    # which would let malformed hashes through; match the 32-byte hex shape exactly.
+    return _HEX_32_PATTERN.fullmatch(value) is not None
 
 
 def _validate_timestamp(value: Any) -> None:
@@ -88,12 +95,48 @@ def pack_envelope(metadata: dict[str, Any], version: int = 2) -> bytes:
     else:
         raise ValueError(f"unsupported metadata version {version}")
 
-    body = zlib.compress(_canonical_json(metadata), level=9)
+    canonical = _canonical_json(metadata)
+    # Bound the metadata itself, not just its compressed form: a highly
+    # compressible field must not be able to smuggle an oversized payload.
+    if len(canonical) > MAX_DECOMPRESSED_BYTES:
+        raise ValueError("metadata payload exceeds the 64 KiB steganography limit")
+
+    body = zlib.compress(canonical, level=9)
     if len(body) > MAX_PAYLOAD_BYTES:
         raise ValueError("metadata payload exceeds the 64 KiB steganography limit")
 
     checksum = hashlib.sha256(body).digest()
     return magic + struct.pack(">I", len(body)) + checksum + body
+
+
+def _decompress_metadata(body: bytes) -> bytes | None:
+    """Inflate ``body`` while refusing to allocate more than the metadata ceiling.
+
+    ``zlib.decompress`` expands a small, checksum-valid member into an
+    arbitrarily large buffer, so a 64 KiB envelope body can be used as a
+    decompression bomb. Streaming through a ``decompressobj`` with an explicit
+    ``max_length`` keeps peak allocation bounded; anything that would inflate
+    past ``MAX_DECOMPRESSED_BYTES`` (or that is truncated, or carries trailing
+    bytes past the end of the member) is rejected rather than materialised.
+    """
+    decompressor = zlib.decompressobj()
+    try:
+        inflated = decompressor.decompress(body, MAX_DECOMPRESSED_BYTES + 1)
+    except zlib.error:
+        return None
+    if len(inflated) > MAX_DECOMPRESSED_BYTES:
+        return None
+    if decompressor.unconsumed_tail:
+        # The member inflates to more than ``MAX_DECOMPRESSED_BYTES`` bytes and
+        # the rest is still pending; do not let the caller keep draining it.
+        return None
+    if not decompressor.eof:
+        # Truncated or incomplete zlib stream.
+        return None
+    if decompressor.unused_data:
+        # Bytes after the end of the zlib stream are not part of this member.
+        return None
+    return inflated
 
 
 def unpack_envelope(data: bytes) -> dict[str, Any] | None:
@@ -119,9 +162,13 @@ def unpack_envelope(data: bytes) -> dict[str, Any] | None:
     if hashlib.sha256(body).digest() != checksum:
         return None
 
+    inflated = _decompress_metadata(body)
+    if inflated is None:
+        return None
+
     try:
-        value = json.loads(zlib.decompress(body).decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError, zlib.error):
+        value = json.loads(inflated.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return None
 
     if not isinstance(value, dict):

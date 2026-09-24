@@ -292,6 +292,79 @@ fn proof_length_sweep_is_bounded_and_declared() {
     }
 }
 
+
+#[test]
+fn proof_length_edges_are_exact() {
+    let base = positive_frame(verifier_inputs::SCHEMA_SILENT_WITNESS);
+    let cases: &[(u32, u32)] = &[
+        (0, verifier_inputs::RejectCode::ProofUndersize.as_code()),
+        (
+            verifier_inputs::MIN_PROOF_BYTES - 1,
+            verifier_inputs::RejectCode::ProofUndersize.as_code(),
+        ),
+        (verifier_inputs::MIN_PROOF_BYTES, verifier_inputs::ACCEPTED_CODE),
+        (verifier_inputs::MAX_PROOF_BYTES, verifier_inputs::ACCEPTED_CODE),
+        (
+            verifier_inputs::MAX_PROOF_BYTES + 1,
+            verifier_inputs::RejectCode::ProofOversize.as_code(),
+        ),
+        (u32::MAX, verifier_inputs::RejectCode::ProofOversize.as_code()),
+    ];
+
+    for &(proof_len, expected) in cases {
+        let verdict = match verifier_inputs::classify(
+            verifier_inputs::SCHEMA_SILENT_WITNESS,
+            &base,
+            proof_len,
+            &REVOCATION_DOMAIN_SEPARATOR,
+        ) {
+            Ok(()) => verifier_inputs::ACCEPTED_CODE,
+            Err(code) => code.as_code(),
+        };
+        assert_eq!(
+            verdict, expected,
+            "proof_len={} expected {} got {}",
+            proof_len, expected, verdict
+        );
+    }
+}
+
+#[test]
+fn proof_length_boundary_neighbourhood_is_declared() {
+    // Structured neighbourhood around the accepted window — complements the
+    // full-u32 sweep with denser coverage of the off-by-one band.
+    let base = positive_frame(verifier_inputs::SCHEMA_SILENT_WITNESS);
+    let mut lengths: Vec<u32> = vec![];
+    for delta in 0u32..32 {
+        lengths.push(delta); // near zero / undersize
+        lengths.push(verifier_inputs::MIN_PROOF_BYTES.saturating_sub(delta));
+        lengths.push(verifier_inputs::MIN_PROOF_BYTES.saturating_add(delta));
+        lengths.push(verifier_inputs::MAX_PROOF_BYTES.saturating_sub(delta));
+        if let Some(over) = verifier_inputs::MAX_PROOF_BYTES.checked_add(delta) {
+            lengths.push(over);
+        }
+    }
+    lengths.push(u32::MAX);
+
+    for proof_len in lengths {
+        let verdict = match verifier_inputs::classify(
+            verifier_inputs::SCHEMA_SILENT_WITNESS,
+            &base,
+            proof_len,
+            &REVOCATION_DOMAIN_SEPARATOR,
+        ) {
+            Ok(()) => verifier_inputs::ACCEPTED_CODE,
+            Err(code) => code.as_code(),
+        };
+        assert!(
+            declared(verdict),
+            "proof_len={} gave undeclared {}",
+            proof_len,
+            verdict
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 2. The real on-chain boundary
 // ---------------------------------------------------------------------------

@@ -380,11 +380,16 @@ the NeonDB event log, or inject malicious data into the proof record.
 | `limit` parameter on `GET /api/proofs` is clamped to [1, 100] | `db.py` → `list_proof_events` |
 | Metrics endpoint is token-gated (`METRICS_TOKEN`) | `app.py` → `metrics` route |
 | Request IDs (`X-Request-ID`) enable per-request tracing | `app.py` → `start_request_context` |
+| Per-client rate limits on embed/extract/register/noir and upload-session create/chunk/commit, keyed on the real client IP | `app.py` → `@limiter.limit`, `config.py` |
+| `Retry-After` + `X-RateLimit-*` hints and a JSON `RATE_LIMITED` envelope carrying `request_id` | `app.py` → `rate_limit_exceeded` |
 
-**Residual risk:** There is no rate limiting on any endpoint. A single IP can
-send an unlimited number of embed requests within the connection limit of the
-host. Video processing (ffmpeg frame pipeline) is CPU and memory intensive;
-even a few concurrent large-video requests can saturate the backend.
+**Residual risk:** Per-client rate limits are enforced per endpoint, but the
+default in-process store (`memory://`) is not shared across workers, so counters
+must be backed by a shared store in multi-worker or multi-replica deployments.
+`TRUSTED_PROXIES` must be configured behind a reverse proxy, otherwise every
+request keys on the proxy address. Video processing (ffmpeg frame pipeline) is
+still CPU and memory intensive; a few concurrent large-video requests can
+saturate a single worker.
 `POST /api/proofs/register` has no authentication at all — any caller can insert
 arbitrary (but format-validated) rows into `proof_events`. This means NeonDB
 cannot be used as a trusted audit log for on-chain activity.
@@ -662,17 +667,18 @@ confirms a zero-length or trivially-constructed proof is rejected.
 
 ---
 
-### OR-2 No Rate Limiting on Backend API
+### OR-2 Backend API Rate Limiting
 
-**Severity:** High  
+**Severity:** Low (residual)  
 **Component:** Flask backend  
-**Description:** All endpoints (`/api/stego/embed`, `/api/stego/extract`,
-`/api/proofs/register`) are unauthenticated and rate-unlimited. A single IP can
-submit thousands of requests and exhaust CPU (ffmpeg), memory, or the NeonDB
-connection pool.  
-**Remediation:** Add a reverse-proxy rate limit (nginx `limit_req`) or a
-Flask middleware (e.g., `flask-limiter`) keyed on IP address. Consider requiring
-a signed request token for embed operations.
+**Description:** Per-client rate limits now guard the upload and proof endpoints
+via `flask-limiter`, keyed on the real client IP. The remaining risk is
+deployment shape: the default `memory://` store is per-process, so limits must
+be backed by a shared store (`RATELIMIT_STORAGE_URI`) when running more than one
+worker or replica.  
+**Remediation:** Configure `RATELIMIT_STORAGE_URI` (e.g. Redis) and
+`TRUSTED_PROXIES` for multi-worker deployments; consider a signed request token
+for embed operations.
 
 ---
 
@@ -847,8 +853,26 @@ correlation identifiers (`request_id`, `trace_id`, `span_id`,
 | Allowed | Opaque IDs, W3C `traceparent` (v00), sanitized routes, versioned ID tags |
 | Forbidden | Media bytes, proofs, witness values, private keys, secrets, raw IPs, raw User-Agent |
 | Malformed / oversized headers | Ignored; generated opaque IDs substituted |
+| Cross-origin propagation | `http_security.CORS_ALLOW_HEADERS` accepts the trace headers; `CORS_EXPOSE_HEADERS` lets browser clients read the echoed IDs |
 | Migration | Additive; existing `request_id` header/log field retained |
 | Rollback | Stop emitting extended fields; callers keep `request_id` |
+
+## 9.2 Per-Client Upload Rate Limits
+
+**Artifact:** `backend/app.py`, `backend/config.py` (flask-limiter)
+
+Per-client rate limits are enforced at the Flask request boundary for the
+upload and proof endpoints.
+
+| Property | Guarantee |
+|----------|-----------|
+| Trust boundary | Public HTTP edge; key is the real client IP, never raw forwarded headers |
+| Default windows | embed/extract/register 30/min, silent-witness 20/min, upload-session 60/min, chunk 240/min |
+| Failure response | Stable JSON `RATE_LIMITED` envelope with `request_id`; `Retry-After` + `X-RateLimit-*` headers |
+| Privacy | Counters and logs never include media bytes, witness values, secrets, or raw forwarded headers |
+| Malformed input | Oversized/unknown paths still counted per client; spoofed `X-Forwarded-For` ignored unless the peer is a trusted proxy |
+| Migration | Additive; `RATELIMIT_ENABLED=false` disables the layer without changing routes |
+| Rollback | Remove `@limiter.limit` decorators; endpoints behave as before |
 
 ## 10. Review and Update Cadence
 
@@ -870,3 +894,4 @@ add a one-line change summary below:
 | 1.0 | 2026-07-24 | Initial threat model. Covers all four components. Nine open risks identified. |
 | 1.1 | 2026-07-26 | Add OR-10: Threshold seal policy governance (m-of-n Public Seal). |
 | 1.2 | 2026-09-24 | Document privacy-safe backend trace fields (`harpocrates-trace-v1`). |
+| 1.3 | 2026-09-24 | Expose/allowed propagation headers through the CORS policy. |

@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react'
+import { emitScrubbedTelemetry } from '../telemetry'
 import { Shield, RotateCcw } from 'lucide-react'
 import './ErrorBoundary.css'
 
@@ -21,7 +22,12 @@ export default class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBo
   }
 
   componentDidCatch(_error: Error, info: ErrorInfo) {
-    console.error('[ErrorBoundary]', _error.message, info.componentStack)
+    // Scrub before console so stack/message never carry seeds, proofs, or media.
+    emitScrubbedTelemetry('error', 'ErrorBoundary.catch', {
+      message: _error.message,
+      name: _error.name,
+      componentStack: info.componentStack ?? undefined,
+    })
   }
 
   handleReset = () => {
