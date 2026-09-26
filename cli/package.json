@@ -15,6 +15,7 @@
   },
   "exports": {
     ".": "./dist/index.js",
+    "./c2pa": "./dist/c2pa.js",
     "./hashing": "./dist/hashing.js",
     "./metadata": "./dist/metadata.js",
     "./manifest": "./dist/manifest.js",

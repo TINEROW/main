@@ -19,6 +19,26 @@ To verify a signed verification receipt offline without hitting the RPC:
 node dist/cli.js verify-receipt --receipt receipt.json --keys trusted_keys.json
 ```
 
+To export C2PA authenticity assertions from a proof manifest (with an optional
+verification receipt) for signing by your own C2PA tooling and key material:
+
+```sh
+node dist/cli.js c2pa --manifest proof.json [--receipt receipt.json] --output export.json
+```
+
+The export is an **unsigned** C2PA JSON manifest definition carrying standard
+`c2pa.actions.v2` and `c2pa.hash.data` assertions plus namespaced
+`harpocrates.registry.v1` (canonical manifest fields bound by
+`manifestHash`), `harpocrates.verification.v1` (the receipt outcome verbatim,
+only when `--receipt` is supplied, never a fabricated `valid`), and
+`harpocrates.export.v1` (`unsigned: true`). It contains only public manifest
+and registry fields; it never carries media bytes, witness values, secrets,
+proof bytes, or signing keys, and the exporter never signs. Out-of-band you
+sign the result with your own C2PA signer. Missing `--manifest` exits 2;
+malformed, unsupported, or unreadable input exits 8. The export is
+deterministic, so the same manifest and receipt always produce the same bytes
+(reproducible in CI via `devx/validate_c2pa_fixture.py`).
+
 For reproducible, network-free manifest and status fixtures, run from `cli/`:
 
 ```sh

@@ -281,37 +281,41 @@ def create_app() -> Flask:
         - If REGISTER_API_KEY is not configured the endpoint is open (development
           convenience identical to the previous behaviour).
         - Otherwise the request must carry ``Authorization: Bearer <key>``.
-        - If REGISTER_API_KEY_EXPIRES is set and the current UTC time is at or
-          past that instant the key is treated as expired and the request is
-          rejected with 401.
+        - ``REGISTER_API_KEY_PREVIOUS`` can overlap the primary key during a
+          rotation.  It is accepted until its optional expiry, allowing
+          already-deployed clients to transition without downtime.
         """
 
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
-            expected_key = config.register_api_key
-            if expected_key is None:
+            if config.register_api_key is None:
                 # No key configured – allow the request (dev mode).
                 return fn(*args, **kwargs)
-
-            # Check expiry before validating the key so that an expired key
-            # is never accepted even if the token matches.
-            expires = config.register_api_key_expires
-            if expires is not None:
-                from datetime import datetime as _dt
-
-                now = _dt.now(tz=timezone.utc)
-                if now >= expires:
-                    return jsonify({"error": "API key has expired"}), 401
 
             auth_header = request.headers.get("Authorization", "")
             if not auth_header.startswith("Bearer "):
                 return jsonify({"error": "Authorization header with Bearer token is required"}), 401
 
-            provided_key = auth_header[len("Bearer "):]
-            # Constant-time comparison to mitigate timing attacks.
+            provided_key = auth_header[len("Bearer "):].strip()
+            now = datetime.now(tz=timezone.utc)
+
+            # Constant-time comparison is performed for every configured key.
+            # Do not reveal whether a key is primary, previous, or expired.
             import hmac as _hmac
 
-            if not _hmac.compare_digest(provided_key, expected_key):
+            candidates = (
+                (config.register_api_key, config.register_api_key_expires),
+                (config.register_api_key_previous, config.register_api_key_previous_expires),
+            )
+            valid = False
+            for expected_key, expires in candidates:
+                matches = bool(expected_key) and _hmac.compare_digest(provided_key, expected_key)
+                if matches and (expires is None or now < expires):
+                    valid = True
+
+            if not valid:
+                if config.register_api_key_expires is not None and now >= config.register_api_key_expires:
+                    return jsonify({"error": "API key has expired"}), 401
                 return jsonify({"error": "Invalid API key"}), 401
 
             return fn(*args, **kwargs)
@@ -396,6 +400,12 @@ def create_app() -> Flask:
     @app.get("/ready")
     def ready():
         status = readiness_manager.check()
+        for dependency in readiness_manager.deps:
+            metrics_collector.record_dependency_status(
+                dependency.name,
+                status.get(dependency.name, "unknown"),
+                dependency.critical,
+            )
         trace = current_trace_fields()
         return jsonify(
             {
@@ -828,6 +838,7 @@ def create_app() -> Flask:
 
     @app.post("/api/proofs/register")
     @limiter.limit(config.ratelimit_register)
+    @require_register_auth
     @idempotent("register")
     def register_proof_event():
         if _enforce_json_size() > config.max_json_bytes:
@@ -1351,6 +1362,178 @@ def create_app() -> Flask:
             "ok": True,
             "message": "Selective disclosure proof submission accepted.",
             "note": "On-chain verification must be performed via verify_selective_disclosure on the registry contract.",
+        })
+
+    # -----------------------------------------------------------------------
+    # C2PA interoperability
+    # -----------------------------------------------------------------------
+
+    @app.post("/api/c2pa/export")
+    def c2pa_export():
+        """
+        Export a C2PA-compatible authenticity manifest from Harpocrates evidence
+        digests.
+
+        Request body (JSON):
+            video_hash    string  32-byte hex (embedded video hash registered on-chain)
+            metadata_hash string  32-byte hex
+            proof_id      string  32-byte hex
+            tier          string  'silent' | 'source' | 'seal'
+            network       string  Stellar network passphrase
+            contract_id   string  Soroban registry contract ID
+            claim_generator string  Optional override for the C2PA claim_generator field
+
+        Response body (JSON):
+            ok            bool    true
+            manifest      object  Serialisable C2PA-compatible manifest
+            digest        string  SHA-256 of the canonical JSON (for round-trip checks)
+            trust_status  string  Always 'signature_not_checked' — C2PA trust is
+                                  independent of on-chain / ZK status
+
+        The C2PA trust status is explicitly separate from Harpocrates on-chain or
+        ZK verification status.  Callers MUST NOT treat the exported manifest as
+        a Harpocrates proof or an on-chain confirmation.
+        """
+        if not request.is_json:
+            return error_response(
+                code=VALIDATION_ERROR,
+                message="JSON body is required",
+                status=400,
+            )
+        body = request.get_json(silent=True) or {}
+
+        required_fields = ("video_hash", "metadata_hash", "proof_id", "tier", "network", "contract_id")
+        for field_name in required_fields:
+            if field_name not in body:
+                return error_response(
+                    code=VALIDATION_ERROR,
+                    message=f"missing required field: {field_name}",
+                    status=400,
+                )
+
+        try:
+            exported = export_c2pa_manifest(
+                video_hash=body["video_hash"],
+                metadata_hash=body["metadata_hash"],
+                proof_id=body["proof_id"],
+                tier=body["tier"],
+                network=body["network"],
+                contract_id=body["contract_id"],
+                claim_generator=body.get("claim_generator"),
+            )
+        except ValueError as exc:
+            return error_response(
+                code=VALIDATION_ERROR,
+                message=str(exc),
+                status=400,
+            )
+
+        return ok_response({
+            "manifest": exported.manifest,
+            "digest": exported.digest,
+            # Explicit trust separation: C2PA export never implies on-chain status.
+            "trust_status": C2paTrustStatus.SIGNATURE_NOT_CHECKED.value,
+            "note": (
+                "C2PA trust status is independent of Harpocrates on-chain and ZK "
+                "verification. Do not treat this manifest as a Harpocrates proof."
+            ),
+        })
+
+    @app.post("/api/c2pa/import")
+    def c2pa_import():
+        """
+        Parse and validate a C2PA-compatible authenticity manifest.
+
+        Request body (JSON):
+            manifest  string | object  Raw manifest (JSON string or pre-parsed object)
+
+        Response body (JSON):
+            ok            bool    true
+            binding       object  Extracted Harpocrates binding fields
+            trust_status  string  'signature_not_checked' — always; see note
+            unknown_assertions  list  Assertions not recognised by this version
+                                      (unsupported_semantics: true)
+            note          string  Trust model clarification
+
+        The trust_status is always 'signature_not_checked'.  C2PA signature
+        verification is out of scope.  The extracted binding must be corroborated
+        against on-chain records via the standard Harpocrates verification flow
+        before any trust decision is made.
+        """
+        if not request.is_json:
+            return error_response(
+                code=VALIDATION_ERROR,
+                message="JSON body is required",
+                status=400,
+            )
+        body = request.get_json(silent=True) or {}
+
+        if "manifest" not in body:
+            return error_response(
+                code=VALIDATION_ERROR,
+                message="missing required field: manifest",
+                status=400,
+            )
+
+        manifest_raw = body["manifest"]
+        # Accept either a pre-parsed object or a raw JSON string.
+        if isinstance(manifest_raw, dict):
+            try:
+                import json as _json
+                manifest_bytes = _json.dumps(manifest_raw, separators=(",", ":")).encode("utf-8")
+            except (TypeError, ValueError):
+                return error_response(
+                    code=VALIDATION_ERROR,
+                    message="manifest object could not be serialised",
+                    status=400,
+                )
+        elif isinstance(manifest_raw, str):
+            manifest_bytes = manifest_raw.encode("utf-8")
+        else:
+            return error_response(
+                code=VALIDATION_ERROR,
+                message="manifest must be a JSON object or string",
+                status=400,
+            )
+
+        try:
+            parsed = parse_c2pa_manifest(manifest_bytes)
+        except C2paParseError as exc:
+            # Privacy-safe: only the reason code and optional field name are returned.
+            err_payload = exc.to_dict()
+            return error_response(
+                code=VALIDATION_ERROR,
+                message=f"C2PA manifest parse failed: {err_payload['reason']}"
+                        + (f" (field: {err_payload['field']})" if err_payload.get("field") else ""),
+                status=400,
+            )
+
+        binding = parsed.binding
+        unknown = [
+            {
+                "label": ua.label,
+                "unsupported_semantics": ua.unsupported_semantics,
+            }
+            for ua in parsed.unknown_assertions
+        ]
+
+        return ok_response({
+            "binding": {
+                "mapping_version": binding.mapping_version,
+                "video_hash": binding.video_hash,
+                "metadata_hash": binding.metadata_hash,
+                "proof_id": binding.proof_id,
+                "tier": binding.tier,
+                "network": binding.network,
+                "contract_id": binding.contract_id,
+            },
+            "trust_status": parsed.trust_status.value,
+            "unknown_assertions": unknown,
+            "note": (
+                "C2PA trust status is independent of Harpocrates on-chain and ZK "
+                "verification. Corroborate this binding against on-chain records "
+                "before making any trust decision."
+            ),
         })
 
     return app

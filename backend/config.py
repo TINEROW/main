@@ -30,6 +30,13 @@ class AppConfig:
     metrics_enabled: bool
     metrics_token: str | None
     metrics_path: str
+    register_api_key: str | None
+    register_api_key_expires: datetime | None
+    register_api_key_previous: str | None
+    register_api_key_previous_expires: datetime | None
+    retention_worker_enabled: bool
+    retention_interval_seconds: int
+    retention_classes: dict[str, int]
     max_concurrent_requests: int
     max_queue_size: int
     max_concurrent_per_identity: int
@@ -51,6 +58,17 @@ def load_config() -> AppConfig:
             raise RuntimeError("Wildcard CORS origins are not permitted in production")
         if os.getenv("ALLOW_WILDCARD_CORS") != "true":
             raise RuntimeError("Wildcard CORS requires ALLOW_WILDCARD_CORS=true")
+
+    register_api_key = _api_key_env("REGISTER_API_KEY")
+    register_api_key_expires = _datetime_env("REGISTER_API_KEY_EXPIRES")
+    register_api_key_previous = _api_key_env("REGISTER_API_KEY_PREVIOUS")
+    register_api_key_previous_expires = _datetime_env("REGISTER_API_KEY_PREVIOUS_EXPIRES")
+    if register_api_key_previous is not None and register_api_key is None:
+        raise RuntimeError("REGISTER_API_KEY is required when REGISTER_API_KEY_PREVIOUS is set")
+    if register_api_key_previous_expires is not None and register_api_key_previous is None:
+        raise RuntimeError(
+            "REGISTER_API_KEY_PREVIOUS is required when REGISTER_API_KEY_PREVIOUS_EXPIRES is set"
+        )
 
     return AppConfig(
         app_env=app_env,
@@ -77,6 +95,13 @@ def load_config() -> AppConfig:
         metrics_enabled=_bool_env("METRICS_ENABLED", True),
         metrics_token=_str_env("METRICS_TOKEN"),
         metrics_path=os.getenv("METRICS_PATH", "/metrics").strip(),
+        register_api_key=register_api_key,
+        register_api_key_expires=register_api_key_expires,
+        register_api_key_previous=register_api_key_previous,
+        register_api_key_previous_expires=register_api_key_previous_expires,
+        retention_worker_enabled=_bool_env("RETENTION_WORKER_ENABLED", False),
+        retention_interval_seconds=_int_env("RETENTION_INTERVAL_SECONDS", 3600),
+        retention_classes={"default": 30, "short": 7, "long": 365},
         max_concurrent_requests=_int_env("MAX_CONCURRENT_REQUESTS", 50),
         max_queue_size=_int_env("MAX_QUEUE_SIZE", 100),
         max_concurrent_per_identity=_int_env("MAX_CONCURRENT_PER_IDENTITY", 5),
@@ -145,6 +170,30 @@ def _str_env(name: str) -> str | None:
     return value.strip()
 
 
+def _api_key_env(name: str) -> str | None:
+    """Load an API key without ever exposing its value in a config error."""
+    value = _str_env(name)
+    if value is None:
+        return None
+    if len(value) > 4096:
+        raise RuntimeError(f"{name} is too long")
+    return value
+
+
+def _datetime_env(name: str) -> datetime | None:
+    """Parse an optional UTC expiry, accepting ISO-8601 ``Z`` timestamps."""
+    value = _str_env(name)
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise RuntimeError(f"{name} must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
 def _float_env(name: str, default: float) -> float:
     value = os.getenv(name)
     if value is None:
@@ -153,5 +202,3 @@ def _float_env(name: str, default: float) -> float:
     if parsed <= 0.0:
         raise RuntimeError(f"{name} must be positive")
     return parsed
-
-

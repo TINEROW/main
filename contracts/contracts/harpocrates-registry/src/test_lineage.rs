@@ -1,22 +1,25 @@
 #![cfg(test)]
 
-//! Lineage graph bounds (#333).
+//! Lineage graph bounds (#333) and parent content commitments (#332).
 //!
 //! A lineage record is an edge from registered evidence to a derivative. These
-//! tests pin both directions of that edge, the depth the edge implies, and the
-//! fact that a rejected edge costs a parent nothing:
+//! tests pin both directions of that edge, the depth the edge implies, the
+//! parent commitments published for privacy-preserving boundaries (#332), and
+//! the fact that a rejected edge costs a parent nothing:
 //!
 //! 1. A derivative names at least one parent and at most `MAX_LINEAGE_FANOUT`.
 //! 2. A parent is charged for at most `MAX_LINEAGE_FANOUT` derivatives.
 //! 3. Depth is derived from the parents, never trusted from the caller, and is
 //!    capped at `MAX_LINEAGE_DEPTH`.
-//! 4. An edge only ever points at evidence that exists: no self-reference, no
-//!    repeated parent, no unknown parent, and no digest that is already
-//!    recorded.
-//! 5. A rejected edge leaves every parent's budget untouched.
+//! 4. An edge only ever points at evidence that exists and is still usable: no
+//!    self-reference, no repeated parent, no unknown parent, no revoked or
+//!    expired proof parent, and no digest that is already recorded.
+//! 5. Every registered edge carries a domain-separated commitment for each of
+//!    its parents, derived on-chain from public fields only.
+//! 6. A rejected edge leaves every parent's budget untouched.
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, Address, BytesN, Env};
+use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, Symbol};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -26,12 +29,29 @@ fn bytes32(env: &Env, value: u8) -> BytesN<32> {
     BytesN::from_array(env, &[value; 32])
 }
 
+/// The commitment a parent binding produces (#332), recomputed off-chain.
+fn expected_parent_commitment(env: &Env, a: &BytesN<32>, b: &BytesN<32>) -> BytesN<32> {
+    const PREFIX: [u8; 11] = *b"harp_lin_pc";
+    let mut pre_image = [0u8; 75];
+    pre_image[..11].copy_from_slice(&PREFIX);
+    a.copy_into_slice(&mut pre_image[11..43]);
+    b.copy_into_slice(&mut pre_image[43..75]);
+    env.crypto().sha256(&Bytes::from_array(env, &pre_image))
+}
+
 /// A parent set from a list of seed bytes.
 fn parents(env: &Env, seeds: &[u8]) -> soroban_sdk::Vec<BytesN<32>> {
     let mut out = soroban_sdk::Vec::new(env);
     for seed in seeds.iter() {
         out.push_back(bytes32(env, *seed));
     }
+    out
+}
+
+/// A single-parent vector built from an explicit digest.
+fn one_parent(env: &Env, parent: &BytesN<32>) -> soroban_sdk::Vec<BytesN<32>> {
+    let mut out = soroban_sdk::Vec::new(env);
+    out.push_back(parent.clone());
     out
 }
 
@@ -71,13 +91,6 @@ fn derive(
     record.depth
 }
 
-/// A single-parent vector built from an explicit digest.
-fn one_parent(env: &Env, parent: &BytesN<32>) -> soroban_sdk::Vec<BytesN<32>> {
-    let mut out = soroban_sdk::Vec::new(env);
-    out.push_back(parent.clone());
-    out
-}
-
 // ---------------------------------------------------------------------------
 // Positive paths
 // ---------------------------------------------------------------------------
@@ -85,16 +98,7 @@ fn one_parent(env: &Env, parent: &BytesN<32>) -> soroban_sdk::Vec<BytesN<32>> {
 #[test]
 fn registers_lineage_with_bounded_validation() {
     let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register(HarpocratesRegistry, ());
-    let client = HarpocratesRegistryClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let actor = Address::generate(&env);
-    let parent = bytes32(&env, 1);
-
-    client.init(&admin);
-    client.register_source(&actor, &bytes32(&env, 2), &bytes32(&env, 3), &parent);
+    let (client, actor, parent) = setup(&env);
 
     let lineage = client.register_lineage(
         &actor,
@@ -142,6 +146,7 @@ fn accepts_a_parent_set_exactly_at_the_fanout_cap() {
     );
 
     assert_eq!(record.parent_proof_ids.len(), MAX_LINEAGE_FANOUT);
+    assert_eq!(record.parent_commitments.len(), MAX_LINEAGE_FANOUT);
     assert_eq!(record.depth, 1);
     // Every distinct parent was charged exactly once.
     for seed in seeds.iter() {
@@ -177,6 +182,84 @@ fn derives_depth_from_the_deepest_parent() {
 }
 
 // ---------------------------------------------------------------------------
+// Parent content commitments (#332)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stores_parent_commitments_for_a_proof_parent() {
+    let env = Env::default();
+    let (client, actor, evidence) = setup(&env);
+
+    let record = client.register_lineage(
+        &actor,
+        &one_parent(&env, &evidence),
+        &bytes32(&env, 0x18),
+        &Symbol::new(&env, "crop"),
+        &bytes32(&env, 0x19),
+        &1,
+    );
+
+    // The commitment binds the parent's public (video_hash, metadata_hash).
+    let expected = expected_parent_commitment(&env, &bytes32(&env, 0xE2), &bytes32(&env, 0xE3));
+    assert_eq!(record.parent_commitments.len(), 1);
+    assert_eq!(record.parent_commitments.get(0).unwrap(), expected);
+
+    let fetched = client
+        .get_lineage_parent_commitments(&bytes32(&env, 0x19))
+        .unwrap();
+    assert_eq!(fetched.get(0).unwrap(), expected);
+
+    let stored = client.get_lineage(&bytes32(&env, 0x19)).unwrap();
+    assert_eq!(stored.parent_commitments, record.parent_commitments);
+}
+
+#[test]
+fn stores_commitments_for_a_lineage_parent_chain() {
+    let env = Env::default();
+    let (client, actor, evidence) = setup(&env);
+
+    let mid = client.register_lineage(
+        &actor,
+        &one_parent(&env, &evidence),
+        &bytes32(&env, 0x20),
+        &Symbol::new(&env, "blur"),
+        &bytes32(&env, 0x21),
+        &1,
+    );
+
+    let child = client.register_lineage(
+        &actor,
+        &one_parent(&env, &bytes32(&env, 0x21)),
+        &bytes32(&env, 0x22),
+        &Symbol::new(&env, "redact"),
+        &bytes32(&env, 0x23),
+        &2,
+    );
+
+    // A lineage parent binds (manifest_digest, output_digest) instead.
+    let expected = expected_parent_commitment(&env, &mid.manifest_digest, &mid.output_digest);
+    assert_eq!(child.parent_commitments.get(0).unwrap(), expected);
+    assert_eq!(
+        client
+            .get_lineage_parent_commitments(&bytes32(&env, 0x23))
+            .unwrap()
+            .get(0)
+            .unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn get_lineage_parent_commitments_missing_is_none() {
+    let env = Env::default();
+    let (client, _actor, _evidence) = setup(&env);
+
+    assert!(client
+        .get_lineage_parent_commitments(&bytes32(&env, 0x99))
+        .is_none());
+}
+
+// ---------------------------------------------------------------------------
 // Fan-out: parents per derivative
 // ---------------------------------------------------------------------------
 
@@ -184,37 +267,33 @@ fn derives_depth_from_the_deepest_parent() {
 #[should_panic(expected = "Error(Contract, #60)")]
 fn rejects_excessive_fanout() {
     let env = Env::default();
-    env.mock_all_auths();
+    let (client, actor, evidence) = setup(&env);
 
-    let contract_id = env.register(HarpocratesRegistry, ());
-    let client = HarpocratesRegistryClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let actor = Address::generate(&env);
-    client.init(&admin);
-
-    let parents = soroban_sdk::Vec::from_array(
-        &env,
-        [
-            bytes32(&env, 1),
-            bytes32(&env, 2),
-            bytes32(&env, 3),
-            bytes32(&env, 4),
-            bytes32(&env, 5),
-        ],
-    );
+    let mut too_many = soroban_sdk::Vec::new(&env);
+    too_many.push_back(evidence);
+    for i in 0..MAX_LINEAGE_FANOUT {
+        let extra = 0x30 + i as u8;
+        client.register_source(
+            &actor,
+            &bytes32(&env, extra),
+            &bytes32(&env, extra.wrapping_add(1)),
+            &bytes32(&env, extra.wrapping_add(2)),
+        );
+        too_many.push_back(bytes32(&env, extra.wrapping_add(2)));
+    }
 
     client.register_lineage(
         &actor,
-        &parents,
-        &bytes32(&env, 6),
+        &too_many,
+        &bytes32(&env, 0x40),
         &Symbol::new(&env, "compose"),
-        &bytes32(&env, 7),
+        &bytes32(&env, 0x41),
         &1,
     );
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #57)")]
+#[should_panic(expected = "Error(Contract, #76)")]
 fn rejects_an_empty_parent_set() {
     let env = Env::default();
     let (client, actor, _) = setup(&env);
@@ -233,7 +312,7 @@ fn rejects_an_empty_parent_set() {
 #[should_panic(expected = "Error(Contract, #57)")]
 fn rejects_a_repeated_parent() {
     let env = Env::default();
-    let (client, actor, evidence) = setup(&env);
+    let (client, actor, _) = setup(&env);
 
     // Naming the same parent twice is one edge, not two, and is refused so the
     // fan-out cap always counts distinct parents.
@@ -245,7 +324,6 @@ fn rejects_a_repeated_parent() {
         &bytes32(&env, 0x53),
         &1,
     );
-    let _ = evidence;
 }
 
 // ---------------------------------------------------------------------------
@@ -273,7 +351,7 @@ fn enforces_the_per_parent_fanout_cap() {
         MAX_LINEAGE_FANOUT
     );
 
-    // One more derivative of the same parent is refused.
+    // One more derivative of the same parent is refused with a stable code.
     let overflow = client.try_register_lineage(
         &actor,
         &one_parent(&env, &evidence),
@@ -282,7 +360,7 @@ fn enforces_the_per_parent_fanout_cap() {
         &bytes32(&env, 0x80),
         &1,
     );
-    assert!(overflow.is_err());
+    assert_eq!(overflow, Err(Ok(RegistryError::LineageFanOutSaturated)));
     assert_eq!(
         client.get_lineage_child_count(&evidence),
         MAX_LINEAGE_FANOUT
@@ -321,7 +399,7 @@ fn a_parent_budget_is_shared_by_every_derivative_that_names_it() {
         &bytes32(&env, 0xA1),
         &1,
     );
-    assert!(result.is_err());
+    assert_eq!(result, Err(Ok(RegistryError::LineageFanOutSaturated)));
 
     // The saturated sibling aborted the edge, so the available parent was not
     // charged for a derivative that was never recorded.
@@ -343,7 +421,7 @@ fn a_rejected_edge_does_not_spend_a_parent_budget() {
         &bytes32(&env, 0xB1),
         &1,
     );
-    assert!(repeated.is_err());
+    assert_eq!(repeated, Err(Ok(RegistryError::InvalidLineage)));
     assert_eq!(client.get_lineage_child_count(&evidence), 0);
 
     // A forged depth is rejected the same way.
@@ -355,7 +433,7 @@ fn a_rejected_edge_does_not_spend_a_parent_budget() {
         &bytes32(&env, 0xB3),
         &0,
     );
-    assert!(forged.is_err());
+    assert_eq!(forged, Err(Ok(RegistryError::LineageDepthMismatch)));
     assert_eq!(client.get_lineage_child_count(&evidence), 0);
 
     // The full budget is still available afterwards.
@@ -406,7 +484,7 @@ fn rejects_a_derivative_beyond_the_depth_cap() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #69)")]
+#[should_panic(expected = "Error(Contract, #80)")]
 fn rejects_a_forged_shallow_depth() {
     let env = Env::default();
     let (client, actor, evidence) = setup(&env);
@@ -430,11 +508,13 @@ fn rejects_a_forged_shallow_depth() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #69)")]
+#[should_panic(expected = "Error(Contract, #80)")]
 fn rejects_an_overstated_depth() {
     let env = Env::default();
     let (client, actor, evidence) = setup(&env);
 
+    // A proof parent sits at depth 0, so a derivative of it is depth 1. A
+    // caller asserting anything deeper is refused rather than trusted.
     client.register_lineage(
         &actor,
         &one_parent(&env, &evidence),
@@ -453,20 +533,14 @@ fn rejects_an_overstated_depth() {
 #[should_panic(expected = "Error(Contract, #58)")]
 fn rejects_self_referential_lineage() {
     let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register(HarpocratesRegistry, ());
-    let client = HarpocratesRegistryClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let actor = Address::generate(&env);
-    client.init(&admin);
+    let (client, actor, evidence) = setup(&env);
 
     client.register_lineage(
         &actor,
-        &one_parent(&env, &bytes32(&env, 1)),
+        &one_parent(&env, &evidence),
         &bytes32(&env, 2),
         &Symbol::new(&env, "crop"),
-        &bytes32(&env, 1),
+        &evidence,
         &1,
     );
 }
@@ -483,6 +557,33 @@ fn rejects_an_unknown_parent() {
         &bytes32(&env, 0xFC),
         &Symbol::new(&env, "compose"),
         &bytes32(&env, 0xFD),
+        &1,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #77)")]
+fn rejects_a_revoked_parent_proof() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(HarpocratesRegistry, ());
+    let client = HarpocratesRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let actor = Address::generate(&env);
+    let parent = bytes32(&env, 0x70);
+
+    client.init(&admin);
+    client.register_source(&actor, &bytes32(&env, 0x71), &bytes32(&env, 0x72), &parent);
+    client.revoke_proof(&admin, &parent);
+
+    // A revoked proof can no longer anchor a derivative (#332).
+    client.register_lineage(
+        &actor,
+        &one_parent(&env, &parent),
+        &bytes32(&env, 0x73),
+        &Symbol::new(&env, "crop"),
+        &bytes32(&env, 0x74),
         &1,
     );
 }
@@ -513,7 +614,7 @@ fn rejects_registration_of_an_existing_output_digest() {
         &bytes32(&env, 0x11),
         &1,
     );
-    assert!(replayed.is_err());
+    assert_eq!(replayed, Err(Ok(RegistryError::DuplicateLineage)));
 
     assert_eq!(client.get_lineage(&bytes32(&env, 0x11)).unwrap(), original);
     // The refused attempt did not create a second edge from the parent.

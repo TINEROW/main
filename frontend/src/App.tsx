@@ -142,7 +142,7 @@ function App() {
           <button className="brand" type="button" onClick={() => openView('landing')} title="Home">
             Harpocrates
           </button>
-          <div className="navlinks" aria-label="Primary">
+          <div className="navlinks" role="group" aria-label="Primary">
             <button
               className={currentView === 'studio' ? 'active' : ''}
               aria-current={currentView === 'studio' ? 'page' : undefined}

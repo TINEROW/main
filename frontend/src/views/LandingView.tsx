@@ -24,7 +24,7 @@ export function LandingView({ onOpenStudio, onOpenVerify }: Props) {
             </button>
           </div>
         </div>
-        <div className="signal-panel" aria-label="Protocol status">
+        <div className="signal-panel" role="group" aria-label="Protocol status">
           <span>Integrity</span>
           <strong>SHA-256</strong>
           <span>Privacy</span>
@@ -60,8 +60,9 @@ export function LandingView({ onOpenStudio, onOpenVerify }: Props) {
           <h2>How it works</h2>
           <p>From raw video to chain-verifiable evidence in four steps.</p>
         </div>
-        <div className="workflow-diagram" aria-label="Harpocrates protocol workflow">
-          <svg viewBox="0 0 1120 240" role="img" preserveAspectRatio="xMidYMid meet">
+        <div className="workflow-diagram">
+          <svg viewBox="0 0 1120 240" role="img" aria-labelledby="workflow-diagram-title" preserveAspectRatio="xMidYMid meet">
+            <title id="workflow-diagram-title">Harpocrates protocol workflow</title>
             <defs>
               <marker
                 id="flowArrow"

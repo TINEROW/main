@@ -1,0 +1,61 @@
+name: PR labeler
+
+# Automatically applies change-impact and layer labels to pull requests based
+# on the files they modify, using the path mappings in .github/labeler.yml.
+#
+# Privacy / security notes:
+#   - Uses pull_request_target so the workflow runs with write permissions even
+#     when the PR originates from a fork.  The checkout step uses the base ref
+#     (not the head/fork ref), so untrusted code from the fork is never
+#     executed in this workflow.
+#   - GITHUB_TOKEN requires pull-requests:write only.
+#   - No media, secrets, witnesses, or private keys are accessed.
+#   - The labeler action only reads changed file paths, not file contents.
+#
+# Rollback: disabling this workflow does not remove existing labels; they can
+# be removed manually or by the label-sync workflow if labels.yml is edited.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-labeler-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  label:
+    name: Apply change-impact labels
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out base repository
+        # Checkout the base ref (main), NOT the fork head, so we never execute
+        # untrusted code from a contributor's fork in this privileged context.
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+
+      - name: Install Python dependencies for validator
+        run: pip install --quiet pyyaml
+
+      - name: Validate label and labeler configs
+        # Catches drift between labeler.yml and labels.yml before applying
+        # labels, so a misconfigured labeler never silently applies unknown tags.
+        run: |
+          python3 devx/label_config.py --check .github/labels.yml
+          python3 devx/label_config.py --check-labeler \
+            .github/labeler.yml .github/labels.yml
+
+      - name: Apply labels from path mappings
+        uses: actions/labeler@v5
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          configuration-path: .github/labeler.yml
+          # Do not remove labels that were applied manually; only add.
+          sync-labels: false

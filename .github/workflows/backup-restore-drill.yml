@@ -30,8 +30,8 @@ env:
   RTO_TARGET_MINUTES: 30
 
 jobs:
-  backup:
-    name: Encrypted Backup
+  backup-restore:
+    name: Encrypted Backup and Restore Drill
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -44,8 +44,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gnupg openssl
 
-      - name: Generate ephemeral GPG key for test
-        id: gpg-key
+      - name: Generate ephemeral GPG key
         run: |
           cat > /tmp/gpg-batch <<EOF
           %no-protection
@@ -55,11 +54,13 @@ jobs:
           Name-Email: drill@harpocrates.test
           Expire-Date: 0
           EOF
+
           gpg --batch --gen-key /tmp/gpg-batch
-          FINGERPRINT=$(gpg --list-keys --with-colons drill@harpocrates.test 2>/dev/null | \
-            grep '^fpr' | head -1 | cut -d: -f10)
-          echo "fingerprint=$FINGERPRINT" >> "$GITHUB_OUTPUT"
-          echo "Generated GPG key: $FINGERPRINT"
+
+          # Preserve the private key only on the ephemeral runner so
+          # the drill can simulate recovery after keyring loss.
+          gpg --armor --export-secret-keys drill@harpocrates.test \
+            > /tmp/drill-key.asc
 
       - name: Run backup
         id: backup
@@ -67,12 +68,35 @@ jobs:
           GPG_RECIPIENT: drill@harpocrates.test
         run: |
           chmod +x scripts/backup.sh scripts/restore.sh
+
           BACKUP_FILE=$(./scripts/backup.sh \
             --output-dir /tmp/backup-drill \
             --retention-days "$RETENTION_DAYS" \
-            --gpg-recipient "$GPG_RECIPIENT" 2>&1 | tee /dev/stderr | grep -oE '/tmp/backup-drill/[^ ]+\.gpg' | tail -1)
+            --gpg-recipient "$GPG_RECIPIENT" 2>&1 \
+            | tee /dev/stderr \
+            | grep -oE '/tmp/backup-drill/[^ ]+\.gpg' \
+            | tail -1)
+
           echo "file=$BACKUP_FILE" >> "$GITHUB_OUTPUT"
           echo "Backup created: $BACKUP_FILE"
+
+      - name: Verify backup exists and is encrypted
+        run: |
+          BACKUP_FILE="${{ steps.backup.outputs.file }}"
+
+          if [ ! -f "$BACKUP_FILE" ]; then
+            echo "::error::Backup file not found"
+            exit 1
+          fi
+
+          file "$BACKUP_FILE" | grep -qi "gpg\|encrypted\|data" || {
+            echo "::error::Backup file is not encrypted"
+            file "$BACKUP_FILE"
+            exit 1
+          }
+
+          SIZE=$(stat -c%s "$BACKUP_FILE" 2>/dev/null || stat -f%z "$BACKUP_FILE" 2>/dev/null)
+          echo "Backup verified: $BACKUP_FILE ($SIZE bytes, encrypted)"
 
       - name: Upload backup artifact
         uses: actions/upload-artifact@v7
@@ -82,71 +106,46 @@ jobs:
           retention-days: ${{ env.RETENTION_DAYS }}
           if-no-files-found: error
 
-      - name: Verify backup exists and is encrypted
+      - name: Simulate keyring loss
         run: |
-          BACKUP_FILE="${{ steps.backup.outputs.file }}"
-          if [ ! -f "$BACKUP_FILE" ]; then
-            echo "::error::Backup file not found"
-            exit 1
-          fi
-          # Verify it's actually GPG encrypted
-          file "$BACKUP_FILE" | grep -qi "gpg\|encrypted\|data" || {
-            echo "::error::Backup file is not encrypted"
-            file "$BACKUP_FILE"
-            exit 1
-          }
-          SIZE=$(stat -c%s "$BACKUP_FILE" 2>/dev/null || stat -f%z "$BACKUP_FILE" 2>/dev/null)
-          echo "Backup verified: $BACKUP_FILE ($SIZE bytes, encrypted)"
-
-  restore:
-    name: Restore Drill
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    needs: backup
-    if: ${{ !inputs.backup_only }}
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gnupg openssl
-
-      - name: Import ephemeral GPG key
-        run: |
-          # Export and re-import to simulate restore environment
-          gpg --export-secret-keys -a drill@harpocrates.test > /tmp/drill-key.asc
           gpg --batch --yes --delete-secret-keys drill@harpocrates.test 2>/dev/null || true
           gpg --batch --yes --delete-keys drill@harpocrates.test 2>/dev/null || true
-          gpg --batch --import /tmp/drill-key.asc
-          echo "GPG key imported for restore"
 
-      - name: Download backup artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: backup-drill-encrypted-${{ github.run_id }}
-          path: /tmp/downloaded-backup
+          echo "Ephemeral GPG key removed from keyring"
+
+      - name: Recover GPG key
+        run: |
+          if [ ! -s /tmp/drill-key.asc ]; then
+            echo "::error::Recovery key not found"
+            exit 1
+          fi
+
+          gpg --batch --import /tmp/drill-key.asc
+
+          echo "GPG key recovered successfully"
 
       - name: Run restore
-        id: restore
+        if: ${{ !inputs.backup_only }}
         env:
           GPG_RECIPIENT: drill@harpocrates.test
         run: |
-          BACKUP_FILE=$(find /tmp/downloaded-backup -name "*.gpg" -type f | head -1)
+          BACKUP_FILE="${{ steps.backup.outputs.file }}"
+
           if [ ! -f "$BACKUP_FILE" ]; then
-            echo "::error::No backup file found in downloaded artifacts"
+            echo "::error::No backup file found"
             exit 1
           fi
+
           echo "Restoring from: $BACKUP_FILE"
+
           ./scripts/restore.sh "$BACKUP_FILE" \
             --output-dir /tmp/restore-drill \
             --gpg-recipient "$GPG_RECIPIENT" \
             --rpo-minutes "$RPO_TARGET_MINUTES" \
-            --rto-minutes "$RTO_TARGET_MINUTES" 2>&1
+            --rto-minutes "$RTO_TARGET_MINUTES"
 
       - name: Verify restored content
+        if: ${{ !inputs.backup_only }}
         run: |
           if [ -d /tmp/restore-drill ]; then
             find /tmp/restore-drill -type f | head -20
@@ -158,8 +157,8 @@ jobs:
           fi
 
       - name: Measure RTO compliance
+        if: ${{ !inputs.backup_only }}
         run: |
-          # RTO is measured by the restore script
           echo "RPO target: $RPO_TARGET_MINUTES minutes"
           echo "RTO target: $RTO_TARGET_MINUTES minutes"
           echo "See restore output above for compliance details"

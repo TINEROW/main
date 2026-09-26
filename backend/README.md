@@ -95,6 +95,9 @@ METRICS_PATH=/metrics
 NOIR_WORKER_ENABLED=true
 NOIR_PROOF_TIMEOUT_SECONDS=180
 DATABASE_URL=postgresql://...
+VERIFIER_CACHE_MAX_SIZE=10000
+VERIFIER_CACHE_POSITIVE_TTL_SECONDS=86400.0
+VERIFIER_CACHE_NEGATIVE_TTL_SECONDS=300.0
 ```
 
 Production notes:
@@ -113,6 +116,23 @@ GET /health   liveness only
 GET /ready    database, ffmpeg/ffprobe, and local worker readiness
 GET /metrics  privacy-safe Prometheus metrics endpoint
 ```
+
+## Verifier Proof Cache
+
+`verifier_cache.py` memoizes Noir verifier results with positive and negative
+TTLs. Cache keys are **domain-separated**: a SHA-256 digest over the versioned
+cryptographic domain tag `harpocrates:verifier-cache:v1` followed by
+length-prefixed `domain`, `network`, `circuit_version`, `verifier_version`,
+`proof_hex`, and `public_inputs_hex` fields. Length-prefixed framing makes the
+payload injective over the field tuple, so separator-like characters in any
+field cannot shift a boundary and collide two distinct results. Proof and
+public-input hex are case- and whitespace-canonicalized so the same proof
+cannot fragment into case-variant entries.
+
+Bump `CACHE_KEY_DOMAIN_TAG` (e.g. to `...:v2`) whenever the key field layout
+changes: it orphans every previously cached entry instead of silently reusing
+results derived under a different scheme. Keys are digests only — proof
+material is never stored in plaintext or logged.
 
 ## Test
 

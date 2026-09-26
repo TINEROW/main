@@ -9,6 +9,8 @@ on:
       - 'backend/**'
       - 'contracts/**'
       - 'zk/**'
+      - '.github/labels.yml'
+      - '.github/labeler.yml'
       - '.github/workflows/release-gate.yml'
   push:
     branches: [main]
@@ -19,6 +21,8 @@ on:
       - 'backend/**'
       - 'contracts/**'
       - 'zk/**'
+      - '.github/labels.yml'
+      - '.github/labeler.yml'
 
 permissions:
   contents: read
@@ -43,5 +47,11 @@ jobs:
         run: |
           python3 devx/compatibility_report.py --write --stable --check
           python3 devx/compatibility_report.py --verify-existing --stable --check
+      - name: Validate label taxonomy
+        run: |
+          pip install pyyaml --quiet
+          python3 devx/label_config.py --check .github/labels.yml
+          python3 devx/label_config.py --check-labeler \
+            .github/labeler.yml .github/labels.yml
       - name: Exercise negative release-gate paths
         run: python3 -m unittest discover -s devx -p 'test_*.py' -v

@@ -91,9 +91,11 @@ Every rejection is a stable `RegistryError` code; no partial state is written.
 | A parent is the output digest itself | `LineageCycle` | 58 |
 | Derived depth exceeds `MAX_LINEAGE_DEPTH` | `LineageTooDeep` | 59 |
 | Parent set exceeds `MAX_LINEAGE_FANOUT` | `LineageFanOutExceeded` | 60 |
-| A parent already has `MAX_LINEAGE_FANOUT` derivatives | `LineageFanOutSaturated` | 68 |
-| Claimed depth differs from the derived depth | `LineageDepthMismatch` | 69 |
-| The output digest already has a lineage record | `LineageAlreadyRegistered` | 70 |
+| A parent already has `MAX_LINEAGE_FANOUT` derivatives | `LineageFanOutSaturated` | 79 |
+| Claimed depth differs from the derived depth | `LineageDepthMismatch` | 80 |
+| The output digest already has a lineage record | `DuplicateLineage` | 78 |
+| The parent set is empty | `LineageEmptyParents` | 76 |
+| A parent proof is revoked or expired | `LineageParentUnavailable` | 77 |
 
 Failed calls emit no event and leave no storage change; in particular a rejected
 edge never charges a parent's fan-out budget. Budgets are read for every parent

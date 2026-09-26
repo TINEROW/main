@@ -194,3 +194,25 @@ The contract provides:
 - Contract event indexing and re-indexing from Testnet
 - Dashboard visualization of lineage chains
 - Advanced query support (reverse lineage, transitive closure)
+
+## Parent Commitments (#332)
+
+Lineage registrations now persist a parallel `parent_commitments` vector on each
+`LineageRecord`, derived on-chain as:
+
+```
+SHA-256("harp_lin_pc" || binding_a || binding_b)
+```
+
+- Proof parent: `(video_hash, metadata_hash)`
+- Lineage parent: `(manifest_digest, output_digest)`
+
+Public `LineageRegistered` events emit commitments (not raw parent proof ids).
+`get_lineage_parent_commitments(output_digest)` exposes the same digests for
+interop without expanding the trust boundary. Revoked or expired proof parents
+are rejected with `LineageParentUnavailable`.
+
+Migration: additive on new registrations; re-register any pre-upgrade lineage
+rows that need commitments. Rollback to pre-#332 wasm simply stops writing the
+new field/event.
+

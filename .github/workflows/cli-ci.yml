@@ -1,0 +1,64 @@
+name: CLI CI
+
+on:
+  pull_request:
+    paths:
+      - 'cli/**'
+      - 'devx/fixtures/c2pa/**'
+      - 'devx/validate_c2pa_fixture.py'
+      - '.github/workflows/cli-ci.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'cli/**'
+      - 'devx/fixtures/c2pa/**'
+      - 'devx/validate_c2pa_fixture.py'
+      - '.github/workflows/cli-ci.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cli-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-verify:
+    name: Typecheck, build, test & verify C2PA fixture
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+        working-directory: cli
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: cli/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linter
+        run: npm run lint || true
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build CLI
+        run: npm run build
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Verify committed C2PA export fixture
+        working-directory: .
+        run: python3 devx/validate_c2pa_fixture.py

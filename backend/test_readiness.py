@@ -76,5 +76,14 @@ class TestReadinessManager(unittest.TestCase):
         self.assertTrue(status["ok"])
         self.assertEqual(counter["count"], 2)
 
+    def test_status_values_are_bounded_for_metrics_consumers(self):
+        manager = ReadinessManager(timeout_seconds=0.5, cache_ttl_seconds=1.0)
+        manager.add_dependency("db", lambda: False, critical=True)
+
+        status = manager.check()
+
+        self.assertEqual(set(status), {"db", "ok"})
+        self.assertIn(status["db"], {"connected", "disconnected", "error", "initializing", "not_configured"})
+
 if __name__ == "__main__":
     unittest.main()

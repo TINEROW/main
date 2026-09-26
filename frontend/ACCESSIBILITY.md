@@ -2,8 +2,8 @@
 
 **Scope:** Evidence Studio, Verification Portal, landing page, navigation, and all shared UI  
 **Standard:** WCAG 2.2 Level AA  
-**Date:** 2026-07-24  
-**Status:** Implemented and verified
+**Date:** 2026-07-24 (automated axe-core CI enforcement added 2026-09-25)  
+**Status:** Implemented, verified, and continuously enforced in CI
 
 ---
 
@@ -167,6 +167,22 @@ npm test
 # Expected: 8 test files, 96 tests, all pass
 ```
 
+### 2b. Automated axe-core WCAG 2.2 AA checks
+
+```bash
+cd frontend
+npm run test:a11y
+# Expected: src/a11y.axe.test.tsx — 10 tests, all pass
+```
+
+The axe suite renders each public view (landing, evidence studio × both tiers,
+verify, batch workspace) and asserts that no WCAG-tagged rule reports a
+violation, using the shared configuration in `src/test/axeA11y.ts`. It also
+proves the harness has teeth (a synthetic broken-tree fixture must be flagged),
+bounds the only jsdom-unrunnable rule (`color-contrast`), and fails closed if a
+new "incomplete" rule ever appears without a documented acknowledgement. See
+["Automated axe-core Enforcement (CI)"](#automated-axe-core-enforcement-ci).
+
 The `useA11y.test.ts` file contains 27 tests covering:
 - `useLiveRegion`: empty message, safe passthrough, hex redaction, Stellar key/contract ID redaction, path redaction, empty string, multi-value, politeness param
 - `useA11yStage`: all 7 Stage values, reactivity on stage change
@@ -208,6 +224,49 @@ Use browser DevTools Accessibility panel or the [WebAIM Contrast Checker](https:
 | Data-list dd values | rgba(255,255,255,0.92) ≈ #EAEAEC | #0A0A0C | ~12.4:1 | ✓ |
 | Lede text | rgba(255,255,255,0.78) ≈ #C7C7CC | #030305 | ~10.2:1 | ✓ |
 | Page sub-text | rgba(255,255,255,0.72) ≈ #B8B8BE | #0A0A0C | ~8.4:1 | ✓ |
+
+---
+
+## Automated axe-core Enforcement (CI)
+
+The frontend CI job (`frontend-ci.yml`) runs `npm run test:a11y` after linting,
+so every frontend pull request is scanned for WCAG 2.2 A/AA violations against
+the rendered app before merge.
+
+### What runs and what cannot
+
+- **Rules:** the `wcag2a`, `wcag2aa`, `wcag21a`, `wcag21aa`, and `wcag22aa`
+  tag set, executed by `axe-core` (`src/test/axeA11y.ts`).
+- **Views scanned:** landing, evidence studio with the silent tier (credential
+  and nullifier seed inputs rendered) and the source tier, verify, and batch
+  verification workspace — each asserted to report zero violations.
+- **jsdom limitation:** `color-contrast` requires real computed layout and is
+  the only documented `MANUAL_ONLY_RULES` entry. It is enforced by the manual
+  contrast checklist in this document instead.
+- **Fail-closed discipline:** any axe rule that returns `incomplete` for a
+  reason other than a documented `MANUAL_ONLY_RULES` entry fails the suite, so
+  an environment limitation can never mask a defect without an explicit,
+  reviewed acknowledgement.
+
+### Privacy
+
+The suite renders only idle application states with synthetic fixture data —
+no real video media, seeds, proof witnesses, credentials, or private keys are
+involved, and violation messages are never logged with sensitive material. The
+negative "the harness has teeth" test uses inline browser-style markup only.
+
+### Version, migration, and rollback
+
+- Additive dev-only dependency: `axe-core@^4.13.0` (no runtime bundle impact;
+  the test files live under `src/test` and `**/*.test.tsx`, which the build
+  excludes).
+- No protocol, artifact, contract, or stored-evidence changes; the two landing
+  page labelling fixes are non-breaking HTML attribute additions that align the
+  code with this document's prior claims (`<title>`/`aria-labelledby` on the
+  workflow SVG, `role="group"` on the protocol-status and primary-nav groups).
+- Rollback: revert `App.tsx`, `LandingView.tsx`, the package/lock files, the
+  two new test source files, and the CI step. CI simply stops running axe;
+  no data migration is required.
 
 ---
 
@@ -268,7 +327,14 @@ Offline mode persists nothing and writes no storage, so rollback is lossless.
 
 3. **Freighter wallet extension:** The wallet connection UX depends on the Freighter browser extension injecting its own UI. That UI is outside the scope of this audit.
 
-4. **No automated axe integration:** `axe-core` / `jest-axe` is not in the test suite. The unit tests cover hook logic and DOM semantics via Testing Library queries. A future CI step could run `@axe-core/playwright` against the running dev server for full rule coverage.
+4. **Layout-dependent rules are not covered by jsdom axe:** `axe-core` runs
+   inside jsdom with the WCAG 2.2 A/AA rule set, but jsdom has no rendering
+   engine. `color-contrast` (and any future layout-dependent rule) therefore
+   cannot be evaluated there and is explicitly documented in
+   `MANUAL_ONLY_RULES` (step 5 and the section below). Focus-ring visuality,
+   `:focus-visible` appearance, target size at 200% zoom, and reduced-motion
+   behavior likewise remain in the manual checklist, as they require a real
+   browser.
 
 5. **Colour contrast on animations:** The WebGL EvilEye background and prismatic veil are `aria-hidden` and decorative. Their colours are not subject to contrast requirements. Reduced-motion users see them frozen or at 1 ms duration.
 
@@ -320,3 +386,8 @@ Each nav button (`Evidence`, `Verify`, `Batch Workspace`) has `aria-current="pag
 | `src/App.css` | Existing: skip-link, sr-only, focus-visible rings, touch targets, contrast, reduced-motion |
 | `src/views/StudioView.tsx` | Updated: aria-busy on section, role="status" on status p, aria-pressed on tier tabs, aria-label on data-list, aria-label on studio section, aria-label on download link, visible sr-only statusLabel region |
 | `src/App.test.tsx` | Updated: 8 new integration tests for accessibility features |
+| `src/a11y.axe.test.tsx` | New: automated axe-core WCAG 2.2 AA checks over every public view + negative/boundary/regression coverage |
+| `src/test/axeA11y.ts` | New: shared axe rule set, `MANUAL_ONLY_RULES`, and fail-closed `expectNoA11yViolations` assertion |
+| `src/App.tsx` | Updated: `role="group"` on the primary-navigation button group |
+| `src/views/LandingView.tsx` | Updated: workflow SVG now carries its own `<title>`/`aria-labelledby`; `role="group"` on the protocol-status panel |
+| `.github/workflows/frontend-ci.yml` | Updated: runs `npm run test:a11y` on every frontend CI run |

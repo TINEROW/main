@@ -1,0 +1,164 @@
+# Harpocrates change-impact label taxonomy
+#
+# Labels are grouped into four orthogonal namespaces:
+#   impact/*   — protocol / privacy / security / deployment blast-radius
+#   layer/*    — which workspace the change lands in
+#   type/*     — intent / lifecycle of the PR
+#   status/*   — review gate state
+#
+# Rules:
+#   - Every label carries a color and a non-empty description.
+#   - Descriptions must never reference real media, keys, witnesses, or secrets.
+#   - impact/* labels drive the PR template checklist and the release gate.
+#   - This file is the single source of truth; the label-sync workflow reads it.
+#
+# Schema version: 1 (validated by devx/label_config.py)
+schema_version: 1
+
+labels:
+  # ── impact ──────────────────────────────────────────────────────────────────
+  - name: "impact/protocol"
+    color: "b60205"
+    description: >
+      Changes the hpx-vi/1 verifier-input codec, proof public-input layout,
+      nullifier derivation, or cross-layer conformance vectors.
+      Requires version bump, migration note, and threat-model review.
+
+  - name: "impact/privacy"
+    color: "d93f0b"
+    description: >
+      Touches a boundary where witness values, credential secrets, or nullifiers
+      could be logged, echoed, or transmitted.  Requires privacy-safe response
+      audit and negative-test coverage for secret leakage.
+
+  - name: "impact/security"
+    color: "e4e669"
+    description: >
+      Modifies authentication, authorisation, key handling, ZK circuit
+      constraints, Soroban access-control, or secret-scanning exclusions.
+      Requires security notes and threat-model cross-reference.
+
+  - name: "impact/deployment"
+    color: "0075ca"
+    description: >
+      Affects Docker images, docker-compose, Railway/Render/Fly.io configs,
+      nginx CSP headers, SBOM generation, or release workflow inputs.
+      Requires DEPLOY.md update and rollback note.
+
+  - name: "impact/contract"
+    color: "5319e7"
+    description: >
+      Modifies Soroban registry logic, event schema, verifier binding, issuer
+      registry, nullifier store, or delegation rules.
+      Requires contract-interface-version bump and migration note.
+
+  - name: "impact/zk-circuit"
+    color: "006b75"
+    description: >
+      Changes Noir circuit source, toolchain lock (nargo/bb versions), artifact
+      manifest, or conformance-vector corpus.
+      Requires reproducible-build verification and vector regeneration.
+
+  - name: "impact/api"
+    color: "fbca04"
+    description: >
+      Adds, removes, or changes a backend route, request/response schema,
+      cursor pagination contract, or steganography header set.
+      Requires backward-compatibility note for stored evidence callers.
+
+  - name: "impact/cli"
+    color: "0e8a16"
+    description: >
+      Changes the harpocrates CLI command surface, receipt format, manifest
+      codec, or Stellar lookup output.
+      Requires CLI README and compatibility-report update.
+
+  - name: "impact/devx"
+    color: "c2e0c6"
+    description: >
+      Changes CI workflows, devx tooling, label config, release-gate scripts,
+      or E2E matrix fixtures.  Low protocol risk; does not require migration note
+      unless a gate that previously blocked releases is loosened.
+
+  # ── layer ───────────────────────────────────────────────────────────────────
+  - name: "layer/frontend"
+    color: "bfd4f2"
+    description: "PR primarily modifies frontend/ (React, Vite, Noir client)."
+
+  - name: "layer/backend"
+    color: "d4c5f9"
+    description: "PR primarily modifies backend/ (Flask, steganography, NeonDB)."
+
+  - name: "layer/contracts"
+    color: "fef2c0"
+    description: "PR primarily modifies contracts/ (Soroban Rust workspace)."
+
+  - name: "layer/zk"
+    color: "e6f0ff"
+    description: "PR primarily modifies zk/ (Noir circuits, toolchain, vectors)."
+
+  - name: "layer/cli"
+    color: "f0fff0"
+    description: "PR primarily modifies cli/ (TypeScript CLI)."
+
+  - name: "layer/docs"
+    color: "e8e8e8"
+    description: "PR primarily modifies docs/, README, or CONTRIBUTING."
+
+  - name: "layer/devx"
+    color: "f9d0c4"
+    description: "PR primarily modifies .github/ or devx/ (CI, tooling, labels)."
+
+  # ── type ────────────────────────────────────────────────────────────────────
+  - name: "type/feature"
+    color: "a2eeef"
+    description: "Adds new user-visible functionality."
+
+  - name: "type/fix"
+    color: "d73a4a"
+    description: "Corrects a defect or regression."
+
+  - name: "type/docs"
+    color: "0075ca"
+    description: "Documentation-only change."
+
+  - name: "type/refactor"
+    color: "e4e669"
+    description: "Internal restructuring without observable behaviour change."
+
+  - name: "type/test"
+    color: "0e8a16"
+    description: "Adds or improves test coverage without changing production code."
+
+  - name: "type/chore"
+    color: "ffffff"
+    description: "Maintenance: dependency updates, CI configuration, tooling."
+
+  - name: "type/bug"
+    color: "d73a4a"
+    description: "Tracks a confirmed defect (used on issues)."
+
+  # ── status ──────────────────────────────────────────────────────────────────
+  - name: "status/needs-migration-note"
+    color: "b60205"
+    description: >
+      PR carries impact/protocol, impact/contract, or impact/api and is missing
+      the required migration or compatibility note.
+
+  - name: "status/needs-threat-model-review"
+    color: "d93f0b"
+    description: >
+      PR carries impact/security or impact/privacy and needs a THREAT_MODEL.md
+      cross-reference before merge.
+
+  - name: "status/needs-test-coverage"
+    color: "fbca04"
+    description: "Reviewer has identified missing positive/negative/boundary tests."
+
+  - name: "status/do-not-merge"
+    color: "b60205"
+    description: "PR must not be merged until this label is removed."
+
+  - name: "status/ready-for-review"
+    color: "0e8a16"
+    description: "Author considers the PR complete and ready for reviewer attention."

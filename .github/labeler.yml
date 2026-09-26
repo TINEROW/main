@@ -1,0 +1,161 @@
+# Path-to-label mapping for the actions/labeler auto-labeler.
+#
+# When a PR changes any file matching a glob, the corresponding label is applied.
+# Multiple labels may fire on one PR; all that match are added.
+#
+# Globs follow the micromatch / minimatch format used by actions/labeler v5.
+# Labels listed here must exist in .github/labels.yml (validated by CI).
+#
+# Privacy note: this file contains only path patterns and label names.
+# It must never be extended to include witness values, hashes, keys, or secrets.
+
+# ── layer/* auto-labels ──────────────────────────────────────────────────────
+
+layer/frontend:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "frontend/**"
+
+layer/backend:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "backend/**"
+
+layer/contracts:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "contracts/**"
+
+layer/zk:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "zk/**"
+
+layer/cli:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "cli/**"
+
+layer/docs:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "docs/**"
+      - "*.md"
+      - "CONTRIBUTING.md"
+      - "DEPLOY.md"
+      - "THREAT_MODEL.md"
+      - "SECURITY.md"
+      - "DESIGN.md"
+
+layer/devx:
+  - changed-files:
+    - any-glob-to-any-file:
+      - ".github/**"
+      - "devx/**"
+      - "release/**"
+      - "scripts/**"
+
+# ── impact/* auto-labels ─────────────────────────────────────────────────────
+
+impact/protocol:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "zk/vectors/**"
+      - "docs/zk-conformance-vectors.md"
+      - "NULLIFIER_DERIVATION_SPEC.md"
+      - "backend/verifier_inputs.py"
+      - "backend/test_conformance_vectors.py"
+      - "backend/test_verifier_fuzz.py"
+      - "frontend/src/verifierInputs.ts"
+      - "frontend/src/verifierInputs.*.test.ts"
+
+impact/privacy:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "backend/logging_utils.py"
+      - "backend/analytics/**"
+      - "backend/errors.py"
+      - "backend/http_security.py"
+      - "frontend/src/credentialVault.ts"
+      - "frontend/src/seedVault.ts"
+      - "frontend/src/safeStorage.ts"
+      - "frontend/src/proveWorker.ts"
+      - "frontend/src/noirClient.ts"
+      - "frontend/src/selectiveDisclosure.ts"
+      - "devx/e2e_env_matrix.py"
+
+impact/security:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "backend/http_security.py"
+      - "backend/admission.py"
+      - "backend/quarantine.py"
+      - "backend/strkey.py"
+      - "frontend/src/csp.ts"
+      - "frontend/nginx.conf"
+      - "frontend/src/networkGuard.ts"
+      - "frontend/src/domainSeparator.ts"
+      - "contracts/contracts/harpocrates-registry/src/**"
+      - "THREAT_MODEL.md"
+      - "SECURITY.md"
+      - ".github/workflows/security-scans.yml"
+
+impact/deployment:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "backend/Dockerfile"
+      - "frontend/Dockerfile"
+      - "docker-compose.yml"
+      - "docker-compose.example.yml"
+      - "frontend/nginx.conf"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/sbom-provenance.yml"
+      - "DEPLOY.md"
+      - "release/**"
+
+impact/contract:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "contracts/contracts/**"
+      - "release/verifier-binding.json"
+      - "release/compatibility-manifest.json"
+      - "frontend/src/harpocratesRegistry.ts"
+      - "docs/contract-delegation.md"
+      - "contracts/VERIFIER_INTEGRATION.md"
+      - "contracts/EMERGENCY_PAUSE.md"
+
+impact/zk-circuit:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "zk/noir/**"
+      - "zk/toolchain.lock.json"
+      - "zk/tools/**"
+      - "zk/browser.artifacts.manifest.json"
+      - "frontend/public/noir/**"
+      - "docs/zk-reproducible-builds.md"
+      - "docs/zk-benchmarks.md"
+      - "docs/zk-fuzzing.md"
+
+impact/api:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "backend/app.py"
+      - "backend/schema.py"
+      - "backend/schemas/**"
+      - "backend/stego.py"
+      - "backend/streaming_upload.py"
+      - "backend/verifier_inputs.py"
+      - "docs/streaming-uploads.md"
+
+impact/cli:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "cli/**"
+
+impact/devx:
+  - changed-files:
+    - any-glob-to-any-file:
+      - ".github/**"
+      - "devx/**"
+      - "scripts/**"
+      - "release/**"
